@@ -159,7 +159,7 @@ N4ughtyLLM Gate is a standalone security proxy layer — it does **not** manage 
 | Upstream | Description | Default Port |
 |----------|-------------|-------------|
 | [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | OAuth multi-account LLM proxy (Claude/Gemini/OpenAI) | 8317 |
-| [Sub2API](https://github.com/Wei-Shaw/sub2api) | AI API subscription platform (Claude/Gemini/Antigravity) | 8080 |
+| [Sub2API](https://github.com/repackedadmin/sub2api) | AI API subscription platform (Claude/Gemini/Antigravity) | 8080 |
 | [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) | Multi-source AI client proxy (Gemini CLI/Codex/Kiro/Grok) | 3000 |
 | Any OpenAI-compatible API | — | — |
 
