@@ -1,4 +1,4 @@
-# N4ughtyLLM Gate
+# N4ughtyLLM Gate - © 2026 Repacked Tools (PTY). All rights reserved.
 
 *Last updated: March 24, 2026.*
 
@@ -314,3 +314,8 @@ The `x-target-url` header is required for v2 proxy requests. Include the full ta
 ## License
 
 [MIT](LICENSE)
+
+© 2026 Repacked Tools (PTY). All rights reserved.
+
+
+
