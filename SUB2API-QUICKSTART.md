@@ -1,6 +1,6 @@
 # Sub2API with N4ughtyLLM Gate
 
-**Prerequisite:** Install and run [Sub2API](https://github.com/Wei-Shaw/sub2api) (default port **8080**).
+**Prerequisite:** Install and run [Sub2API](https://github.com/repackedadmin/sub2api) (default port **8080**).
 
 ## Same host as the gateway
 
