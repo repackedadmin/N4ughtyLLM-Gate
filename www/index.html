@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>N4ughtyLLM Gate console</title>
+    <link rel="stylesheet" href="/__ui__/assets/app.css">
+    <script>
+      (function() {
+        var savedTheme = localStorage.getItem('n4ughtyllm_gate_theme') || localStorage.getItem('n4ughtyllm_gate_theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var isDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="app-shell">
+
+      <!-- ── Header ── -->
+      <header class="app-header">
+        <a class="header-brand" href="#overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          N4ughtyLLM Gate
+        </a>
+        <div class="header-sep"></div>
+        <div class="header-status">
+          <span class="status-dot" id="header-status-dot"></span>
+          <span class="header-status-label" id="status-text">Connecting…</span>
+        </div>
+        <div class="header-actions">
+          <button id="theme-toggle" class="btn-hdr" type="button" title="Toggle theme">
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+              <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+            Theme
+          </button>
+          <button id="refresh-bootstrap" class="btn-hdr" type="button" title="Refresh status">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23,4 23,10 17,10"/>
+              <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+            </svg>
+            Refresh
+          </button>
+          <button id="open-health" class="btn-hdr" type="button" title="Health JSON">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/>
+            </svg>
+            Health
+          </button>
+          <button id="restart-button" class="btn-hdr" type="button" title="Restart gateway">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+            </svg>
+            Restart
+          </button>
+          <button id="logout-button" class="btn-hdr btn-hdr-danger" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16,17 21,12 16,7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            Sign out
+          </button>
+        </div>
+      </header>
+
+      <div class="app-body">
+
+        <!-- ── Sidebar ── -->
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">Monitor</span>
+            <a href="#overview" class="nav-item active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              Overview
+            </a>
+            <a href="#stats" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+              </svg>
+              Request stats
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">Configure</span>
+            <a href="#settings" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
+                <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
+                <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+                <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
+              </svg>
+              General
+            </a>
+            <a href="#security" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <polyline points="9,12 11,14 15,10"/>
+              </svg>
+              Security
+            </a>
+            <a href="#v2" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+                <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
+                <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
+              </svg>
+              v2 proxy
+            </a>
+            <a href="#rules" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              Security rules
+            </a>
+            <a href="#redact-values" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+              </svg>
+              Exact redaction
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">Resources</span>
+            <a href="#tokens" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="15" r="4"/>
+                <line x1="11.8" y1="11.2" x2="21" y2="2"/>
+                <line x1="19" y1="4" x2="21" y2="6"/>
+                <line x1="16" y1="7" x2="18" y2="9"/>
+              </svg>
+              Tokens
+            </a>
+            <a href="#docs" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+              </svg>
+              Docs
+            </a>
+          </div>
+          <div class="sidebar-section">
+            <span class="sidebar-section-label">System</span>
+            <a href="#keys" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+              Keys
+            </a>
+            <a href="#compose" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14,2 14,8 20,8"/>
+              </svg>
+              Compose
+            </a>
+            <a href="#logs" class="nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4,17 10,11 4,5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+              Debug
+            </a>
+          </div>
+          <div class="sidebar-footer">
+            <a href="https://github.com/ax128/N4ughtyLLM-Gate" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;color:var(--muted);text-decoration:none;font-size:0.82rem;transition:color 0.15s;">
+              <svg viewBox="0 0 16 16" fill="currentColor" width="16" height="16">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+              </svg>
+              GitHub
+            </a>
+            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">·</span>
+            <span style="color:var(--muted);font-size:0.75rem;opacity:0.5;">N4ughtyLLM Gate</span>
+          </div>
+        </aside>
+
+        <!-- ── Main content ── -->
+        <main class="content">
+
+          <!-- Overview -->
+          <section id="overview">
+            <div class="stat-grid">
+              <div class="stat-card">
+                <div class="stat-card-label">Service status</div>
+                <div class="stat-card-value">
+                  <span id="status-badge">—</span>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Listen address</div>
+                <div class="stat-card-value" id="server-text">—</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Security level</div>
+                <div class="stat-card-value" id="security-text">—</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Default upstream</div>
+                <div class="stat-card-value" id="upstream-text" style="font-size:0.88rem;word-break:break-all;">—</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Stats dashboard -->
+          <section id="stats" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Request stats</h2>
+                <p class="panel-desc">Live request stats: redactions, blocks, passthrough, etc. Persisted for 7 days.</p>
+              </div>
+            </div>
+
+            <div class="stat-grid">
+              <div class="stat-card">
+                <div class="stat-card-label">Total requests</div>
+                <div class="stat-card-value" id="stats-total-requests">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Redactions</div>
+                <div class="stat-card-value" id="stats-total-redactions">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Danger replacements</div>
+                <div class="stat-card-value" id="stats-total-dangerous">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Blocked</div>
+                <div class="stat-card-value" id="stats-total-blocked">--</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card-label">Passthrough</div>
+                <div class="stat-card-value" id="stats-total-passthrough">--</div>
+              </div>
+            </div>
+
+            <div class="rules-tabs" style="margin-top:16px;">
+              <button class="rules-tab active" data-stats-view="hourly">Hourly</button>
+              <button class="rules-tab" data-stats-view="daily">Daily</button>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead id="stats-thead">
+                  <tr><th>Time</th><th>Requests</th><th>Redact</th><th>Danger</th><th>Blocked</th><th>Passthrough</th></tr>
+                </thead>
+                <tbody id="stats-tbody">
+                  <tr><td colspan="6" class="token-table-empty">Loading...</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="token-toolbar" style="margin-top:8px;">
+              <span id="stats-since" style="font-size:0.83rem;color:var(--muted);"></span>
+              <div style="display:flex;gap:8px;">
+                <button id="stats-refresh" class="btn-sm-ghost" type="button">Refresh</button>
+                <button id="stats-clear" class="btn-danger-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                    <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+                  </svg>
+                  Clear data
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <!-- General settings -->
+          <section id="settings" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>
+                  <circle cx="9" cy="6" r="2.2" fill="currentColor" stroke="none"/>
+                  <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+                  <circle cx="9" cy="18" r="2.2" fill="currentColor" stroke="none"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>General</h2>
+                <p class="panel-desc">Click Save to write settings to <code>config/.env</code>.</p>
+              </div>
+            </div>
+            <div id="general-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-general" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                Save general
+              </button>
+              <span id="general-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- Security settings -->
+          <section id="security" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  <polyline points="9,12 11,14 15,10"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Security</h2>
+                <p class="panel-desc">Toggle booleans with buttons: <span style="color:var(--success)">green</span> = on, <span style="color:var(--error)">red</span> = off</p>
+              </div>
+            </div>
+            <div id="security-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-security" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                Save security
+              </button>
+              <span id="security-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- v2 proxy settings -->
+          <section id="v2" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+                  <circle cx="6" cy="6" r="1" fill="currentColor" stroke="none"/>
+                  <circle cx="6" cy="18" r="1" fill="currentColor" stroke="none"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>v2 proxy</h2>
+                <p class="panel-desc">Request filtering, response filtering, and SSRF-related proxy settings.</p>
+              </div>
+            </div>
+            <div id="v2-config" class="form-grid dynamic-config"></div>
+            <div class="panel-actions">
+              <button id="save-v2" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                Save v2
+              </button>
+              <span id="v2-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- Security Rules -->
+          <section id="rules" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="8" x2="12" y2="12"/>
+                  <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Security rules</h2>
+                <p class="panel-desc">Edit detection rules in <code>security_filters.yaml</code>; saving hot-reloads immediately.</p>
+              </div>
+            </div>
+
+            <div class="rules-tabs">
+              <button class="rules-tab active" data-rules-section="pii_patterns">PII patterns</button>
+              <button class="rules-tab" data-rules-section="tool_injection">Tool injection</button>
+              <button class="rules-tab" data-rules-section="command_patterns">Command patterns</button>
+              <button class="rules-tab" data-rules-section="direct_patterns">Direct injection</button>
+              <button class="rules-tab" data-rules-section="system_exfil_patterns">Prompt exfiltration</button>
+              <button class="rules-tab" data-rules-section="action_map">Action map</button>
+            </div>
+
+            <div id="rules-panel" class="rules-panel">
+              <div class="rules-toolbar">
+                <span id="rules-count" style="font-size:0.83rem;color:var(--muted);">Loading…</span>
+                <button id="rules-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  Add rule
+                </button>
+              </div>
+              <div class="token-table-wrap">
+                <table class="token-table" id="rules-table">
+                  <thead id="rules-thead">
+                    <tr><th>ID</th><th>Regex</th><th>Kind</th><th>Actions</th></tr>
+                  </thead>
+                  <tbody id="rules-tbody">
+                    <tr><td colspan="4" class="token-table-empty">Loading…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div id="action-map-panel" class="hidden">
+                <p style="font-size:0.85rem;color:var(--muted);margin-bottom:12px;">Per-threat actions (block / review / sanitize / pass).</p>
+                <div id="action-map-grid" class="form-grid"></div>
+                <div class="panel-actions">
+                  <button id="save-action-map" class="btn-save" type="button">Save action map</button>
+                  <span id="action-map-status" class="status-note"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Exact Value Redaction -->
+          <section id="redact-values" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Exact redaction</h2>
+                <p class="panel-desc">Exact values to redact (API keys, secrets, …); matches become <code>[REDACTED:EXACT_VALUE]</code>. Minimum 10 characters; applies to v1/v2.</p>
+              </div>
+            </div>
+            <div class="token-toolbar">
+              <span id="redact-count" style="font-size:0.83rem;color:var(--muted);">Loading…</span>
+              <div style="display:flex;gap:8px;">
+                <button id="redact-refresh" class="btn-sm-ghost" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                    <polyline points="23,4 23,10 17,10"/>
+                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                  </svg>Refresh
+                </button>
+                <button id="redact-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  Add value
+                </button>
+              </div>
+            </div>
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead>
+                  <tr><th>#</th><th>Value (masked)</th><th>Len</th><th>Actions</th></tr>
+                </thead>
+                <tbody id="redact-tbody">
+                  <tr><td colspan="4" class="token-table-empty">Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Token management -->
+          <section id="tokens" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="8" cy="15" r="4"/>
+                  <line x1="11.8" y1="11.2" x2="21" y2="2"/>
+                  <line x1="19" y1="4" x2="21" y2="6"/>
+                  <line x1="16" y1="7" x2="18" y2="9"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Tokens</h2>
+                <p class="panel-desc">Register upstream URLs and routing tokens; whitelist field values skip redaction.</p>
+              </div>
+            </div>
+
+            <div class="token-toolbar">
+              <span id="token-count" style="font-size:0.83rem;color:var(--muted);">Loading…</span>
+              <div style="display:flex;gap:8px;">
+                <button id="token-refresh" class="btn-sm-ghost" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;display:inline-block;vertical-align:middle;margin-right:4px;">
+                    <polyline points="23,4 23,10 17,10"/>
+                    <path d="M20.5 16a9 9 0 1 1-2.6-7.4L23 10"/>
+                  </svg>Refresh
+                </button>
+                <button id="token-add" class="btn-sm" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                  </svg>
+                  Register token
+                </button>
+              </div>
+            </div>
+
+            <div class="token-table-wrap">
+              <table class="token-table">
+                <thead>
+                  <tr>
+                    <th>Token</th>
+                    <th>Upstream</th>
+                    <th>Whitelist fields</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="token-tbody">
+                  <tr><td colspan="4" class="token-table-empty">Loading…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Docs -->
+          <section id="docs" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Documentation</h2>
+                <p class="panel-desc">Markdown docs from the repository root (README, quick starts, …).</p>
+              </div>
+            </div>
+            <div class="docs-layout">
+              <div id="docs-list" class="docs-list"></div>
+              <article class="doc-viewer">
+                <div class="doc-meta">
+                  <strong id="doc-title">Select a document</strong>
+                  <span id="doc-path">—</span>
+                </div>
+                <div id="doc-content" class="markdown-body">Document content appears here.</div>
+              </article>
+            </div>
+          </section>
+
+          <!-- Key Management -->
+          <section id="keys" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Keys</h2>
+                <p class="panel-desc">View or rotate three key files; restart after changes. <strong style="color:var(--error)">Rotating the Fernet key breaks decryption of historic redaction maps.</strong></p>
+              </div>
+            </div>
+            <div id="keys-grid" class="keys-grid">
+              <div class="key-card" id="key-card-gateway">
+                <div class="key-card-name">Gateway key</div>
+                <div class="key-card-file"><code>n4ughtyllm_gate_gateway.key</code></div>
+                <div class="key-card-status" id="key-status-gateway">—</div>
+                <div class="key-card-actions">
+                  <button class="btn-sm-ghost" data-key-view="gateway">View</button>
+                  <button class="btn-sm" data-key-rotate="gateway">Rotate</button>
+                </div>
+              </div>
+              <div class="key-card" id="key-card-proxy_token">
+                <div class="key-card-name">Proxy token</div>
+                <div class="key-card-file"><code>n4ughtyllm_gate_proxy_token.key</code></div>
+                <div class="key-card-status" id="key-status-proxy_token">—</div>
+                <div class="key-card-actions">
+                  <button class="btn-sm-ghost" data-key-view="proxy_token">View</button>
+                  <button class="btn-sm" data-key-rotate="proxy_token">Rotate</button>
+                </div>
+              </div>
+              <div class="key-card" id="key-card-fernet">
+                <div class="key-card-name">Fernet key</div>
+                <div class="key-card-file"><code>n4ughtyllm_gate_fernet.key</code></div>
+                <div class="key-card-status" id="key-status-fernet">—</div>
+                <div class="key-card-actions">
+                  <button class="btn-sm-ghost" data-key-view="fernet">View</button>
+                  <button class="btn-sm btn-danger-soft" data-key-rotate="fernet">Rotate (dangerous)</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Docker Compose Editor -->
+          <section id="compose" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14,2 14,8 20,8"/>
+                  <line x1="16" y1="13" x2="8" y2="13"/>
+                  <line x1="16" y1="17" x2="8" y2="17"/>
+                  <polyline points="10,9 9,9 8,9"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Compose files</h2>
+                <p class="panel-desc">View and edit Docker Compose files (YAML validated on save).</p>
+              </div>
+            </div>
+            <div id="compose-selector" class="compose-selector"></div>
+            <textarea id="compose-editor" class="compose-editor" spellcheck="false" placeholder="Load a file to edit…"></textarea>
+            <div class="panel-actions">
+              <button id="save-compose" class="btn-save" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                  <polyline points="17,21 17,13 7,13 7,21"/>
+                  <polyline points="7,3 7,8 15,8"/>
+                </svg>
+                Save Compose
+              </button>
+              <span id="compose-save-status" class="status-note"></span>
+            </div>
+          </section>
+
+          <!-- Logs / Debug -->
+          <section id="logs" class="panel">
+            <div class="panel-head">
+              <div class="panel-head-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="4,17 10,11 4,5"/>
+                  <line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+              </div>
+              <div class="panel-head-info">
+                <h2>Logs &amp; debug</h2>
+                <p class="panel-desc">Raw JSON from the bootstrap API.</p>
+              </div>
+            </div>
+            <pre id="bootstrap-output" class="console">Waiting…</pre>
+          </section>
+
+        </main>
+      </div>
+    </div>
+
+    <!-- ── Register / Edit Token Modal ── -->
+    <div id="token-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <input type="hidden" id="modal-edit-token" value="">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="modal-title">Register token</h3>
+          <button id="modal-close" class="modal-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field hidden" id="modal-token-field">
+            <label for="modal-token-input">Token</label>
+            <input id="modal-token-input" type="text" placeholder="Update client base_url after changing this">
+            <p class="field-hint">Path segment for routing; changing it invalidates old base URLs—update clients.</p>
+          </div>
+          <div class="modal-field">
+            <label for="modal-upstream">Upstream <span style="color:var(--error)">*</span></label>
+            <input id="modal-upstream" type="text" placeholder="https://api.openai.com/v1">
+            <p class="field-hint">Upstream base URL without a trailing slash.</p>
+          </div>
+          <div class="modal-field">
+            <label for="modal-whitelist">Whitelist fields (optional)</label>
+            <input id="modal-whitelist" type="text" placeholder="api_key, secret, token">
+            <p class="field-hint">Comma-separated <strong>field names</strong>; values in <code>field=value</code> / <code>field:value</code> / <code>"field":"value"</code> form will <strong>skip redaction</strong> and forward verbatim. Leave empty to redact all fields.</p>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span id="modal-error" class="modal-error"></span>
+          <button id="modal-cancel" class="btn-sm-ghost" type="button">Cancel</button>
+          <button id="modal-submit" class="btn-sm" type="button" data-action="submit-token">Register</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Key View Modal -->
+    <div id="key-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="key-modal-title">Key value</h3>
+          <button id="key-modal-close" class="modal-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p style="font-size:0.83rem;color:var(--muted);margin-bottom:8px;">Keep this secret; do not expose in untrusted environments.</p>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <code id="key-modal-value" style="flex:1;word-break:break-all;background:var(--surface2);padding:10px 12px;border-radius:6px;font-size:0.85rem;"></code>
+            <button id="key-modal-copy" class="btn-sm-ghost" type="button">Copy</button>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button id="key-modal-cancel" class="btn-sm-ghost" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Rule Add/Edit Modal -->
+    <div id="rule-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+      <input type="hidden" id="rule-modal-edit-id" value="">
+      <input type="hidden" id="rule-modal-section" value="">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="rule-modal-title">Add rule</h3>
+          <button id="rule-modal-close" class="modal-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field">
+            <label for="rule-modal-id">Rule ID <span style="color:var(--error)">*</span></label>
+            <input id="rule-modal-id" type="text" placeholder="MY_CUSTOM_RULE">
+          </div>
+          <div class="modal-field">
+            <label for="rule-modal-regex">Regex <span style="color:var(--error)">*</span></label>
+            <input id="rule-modal-regex" type="text" placeholder="(?i)your_pattern_here" style="font-family:monospace;">
+          </div>
+          <div class="modal-field" id="rule-modal-kind-field">
+            <label for="rule-modal-kind">Kind (optional)</label>
+            <input id="rule-modal-kind" type="text" placeholder="sql_injection / xss / ...">
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span id="rule-modal-error" class="modal-error"></span>
+          <button id="rule-modal-cancel" class="btn-sm-ghost" type="button">Cancel</button>
+          <button id="rule-modal-submit" class="btn-sm" type="button">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Redact Value Add Modal -->
+    <div id="redact-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Add exact redaction</h3>
+          <button id="redact-modal-close" class="modal-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-field">
+            <label for="redact-modal-value">Secret value <span style="color:var(--error)">*</span></label>
+            <input id="redact-modal-value" type="text" placeholder="Secret value to redact exactly">
+            <p class="field-hint">At least 10 characters; matches become <code>[REDACTED:EXACT_VALUE]</code></p>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span id="redact-modal-error" class="modal-error"></span>
+          <button id="redact-modal-cancel" class="btn-sm-ghost" type="button">Cancel</button>
+          <button id="redact-modal-submit" class="btn-sm" type="button">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/__ui__/assets/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,189 @@
+# Terminal Clients Wiki (N4ughtyLLM Gate)
+
+This page is the **Wiki-style navigation hub** for connecting terminal/desktop IDE clients to N4ughtyLLM Gate.
+
+## Start Here
+
+1. Multi-upstream / multi-tenant: use **Token mode** first.
+2. Single-upstream fast path: use `N4UGHTYLLM_GATE_UPSTREAM_BASE_URL` and call `/v1/...` directly.
+3. For Claude, use `POST /v1/messages` (supports streaming).
+4. OAuth-hosted login mode is **not supported**.
+
+---
+
+## Wiki Navigation
+
+- [Quick Start (Token Mode)](#quick-start-token-mode)
+- [Quick Start (Direct v1 Mode)](#quick-start-direct-v1-mode)
+- [Claude API Support](#claude-api-support)
+- [Platform Notes (Windows/macOS/Linux/WSL2)](#platform-notes-windowsmacoslinuxwsl2)
+- [Client Matrix](#client-matrix)
+- [Client Profiles](#client-profiles)
+- [Config Templates](#config-templates)
+- [Troubleshooting](#troubleshooting)
+- [Security Baseline](#security-baseline)
+
+---
+
+## Quick Start (Token Mode)
+
+Register once:
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/register \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_base":"https://your-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
+```
+
+Use returned `baseUrl`:
+
+```text
+http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>
+```
+
+Client config baseline:
+- `baseUrl = token baseUrl`
+- `apiKey = upstream real API key`
+
+> If you use Caddy to expose the gateway publicly, `/__gw__/*` admin endpoints should be blocked in Caddyfile.
+> Run registration against `http://127.0.0.1:18080` (localhost) or an internal admin ingress.
+
+---
+
+## Quick Start (Direct v1 Mode)
+
+For single-upstream deployments, configure:
+
+```text
+N4UGHTYLLM_GATE_UPSTREAM_BASE_URL=<YOUR_UPSTREAM_V1_BASE>
+```
+
+Then call:
+
+```text
+http://127.0.0.1:18080/v1/...
+```
+
+Example:
+
+```bash
+curl -X POST 'http://127.0.0.1:18080/v1/messages?anthropic-version=2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+Notes:
+- Use an upstream base that includes provider API prefix (e.g. `.../v1`).
+- `v2` should still use token path: `/v2/__gw__/t/<TOKEN>/...` + `x-target-url`.
+
+---
+
+## Claude API Support
+
+Supported via generic proxy:
+- `POST /v1/messages`
+- `POST /v1/messages/count_tokens`
+- `stream=true` streaming passthrough
+- query passthrough, e.g. `?anthropic-version=2023-06-01`
+
+Example:
+
+```bash
+curl -X POST 'http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/messages?anthropic-version=2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"claude-3-5-sonnet-latest","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+---
+
+## Platform Notes (Windows/macOS/Linux/WSL2)
+
+- Windows (PowerShell): use `Invoke-RestMethod` for token registration.
+- macOS/Linux: use `curl` registration.
+- WSL2: prefer `127.0.0.1:18080`; if unreachable, try Windows host IP.
+
+---
+
+## Client Matrix
+
+| Client | Base URL + API Key | Claude `messages` | OAuth Hosted Login |
+|---|---|---|---|
+| Codex CLI | Yes | Yes | No |
+| OpenCodeX | Yes | Yes | No |
+| Cherry Studio | Yes | Yes | No |
+| VS Code extensions | Extension-dependent | Yes (if base URL configurable) | No |
+| Cursor | Yes | Yes | No |
+
+---
+
+## Client Profiles
+
+### Codex CLI
+- Recommended: Token mode.
+- Requirement: customizable `baseUrl` + API key mode.
+
+### OpenCodeX
+- Use OpenAI-compatible provider mode.
+- Recommended: Token mode.
+
+### Cherry Studio
+- Provider: OpenAI-compatible.
+- Use Token `baseUrl` + upstream API key.
+
+### VS Code
+- Must use an extension that supports custom OpenAI-compatible endpoint.
+- OAuth-only extension mode is not supported.
+
+### Cursor
+- Use custom OpenAI-compatible endpoint mode.
+- Recommended: Token mode.
+
+---
+
+## Config Templates
+
+### Token Mode (Recommended)
+
+```yaml
+provider: openai_compatible
+base_url: http://127.0.0.1:18080/v1/__gw__/t/<YOUR_TOKEN>
+api_key: <UPSTREAM_API_KEY>
+model: claude-3-5-sonnet-latest
+```
+
+## Troubleshooting
+
+### `invalid_parameters`
+- Request path is not token route or required fields are invalid.
+- Use token `base_url` and verify request JSON fields.
+
+### `token_not_found`
+- Token not registered, removed, or token file not persisted.
+- Check `N4UGHTYLLM_GATE_GW_TOKENS_PATH` and volume mapping.
+
+### No Claude streaming output
+- Confirm upstream supports `stream=true`.
+- Confirm client reads SSE stream.
+- Verify with `curl -N` first.
+
+---
+
+## Security Baseline
+
+- Restrict access to:
+  - `POST /__gw__/register`
+  - `POST /__gw__/lookup`
+  - `POST /__gw__/unregister`
+  - `POST /__gw__/add`
+  - `POST /__gw__/remove`
+- In public ingress, block `/__gw__/*` externally and keep it localhost/internal only.
+- Keep `v2` on token path (`/v2/__gw__/t/<TOKEN>/...`), avoid exposing non-token generic proxy.
+- Gateway key is stored in `config/n4ughtyllm_gate_gateway.key` (auto-generated on first run, chmod 600). Read it with `cat config/n4ughtyllm_gate_gateway.key`.
+- Prefer Token mode for all new clients.
+- Do not use OAuth-hosted-only mode for N4ughtyLLM Gate routing.
+
+---
+
+## Related Docs
+
+- `README.md`

@@ -1,0 +1,61 @@
+# Default base deployment: N4ughtyLLM Gate only (service name: n4ughtyllm_gate).
+
+services:
+  n4ughtyllm_gate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: n4ughtyllm_gate
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:18080:18080"
+    expose:
+      - "18080"
+    networks:
+      - default
+      - cliproxy_net
+      - sub2api_net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./config/.env
+        required: false
+    environment:
+      N4UGHTYLLM_GATE_ENV: "prod"
+      N4UGHTYLLM_GATE_HOST: "0.0.0.0"
+      N4UGHTYLLM_GATE_PORT: "18080"
+      N4UGHTYLLM_GATE_ENFORCE_LOOPBACK_ONLY: "false"
+      # Optional: set for single-upstream direct /v1/... mode.
+      N4UGHTYLLM_GATE_UPSTREAM_BASE_URL: "${N4UGHTYLLM_GATE_UPSTREAM_BASE_URL:-}"
+      N4UGHTYLLM_GATE_SQLITE_DB_PATH: "/app/logs/n4ughtyllm_gate.db"
+      N4UGHTYLLM_GATE_AUDIT_LOG_PATH: "/app/logs/audit.jsonl"
+      N4UGHTYLLM_GATE_GW_TOKENS_PATH: "/app/n4ughtyllm_gate/policies/rules/gw_tokens.json"
+      N4UGHTYLLM_GATE_INIT_STRICT: "true"
+      N4UGHTYLLM_GATE_BOOTSTRAP_RULES_DIR: "/app/bootstrap/rules"
+      N4UGHTYLLM_GATE_SECURITY_RULES_PATH: "/app/n4ughtyllm_gate/policies/rules/security_filters.yaml"
+      # Local port routing: /v1/__gw__/t/{port}/... → http://host.docker.internal:{port}/v1/...
+      N4UGHTYLLM_GATE_ENABLE_LOCAL_PORT_ROUTING: "${N4UGHTYLLM_GATE_ENABLE_LOCAL_PORT_ROUTING:-true}"
+      N4UGHTYLLM_GATE_LOCAL_PORT_ROUTING_HOST: "${N4UGHTYLLM_GATE_LOCAL_PORT_ROUTING_HOST:-host.docker.internal}"
+      # Docker upstream auto-registration (token → service name; overrides port routing)
+      # Format: token:service[:port], comma-separated; default port = token if omitted.
+      # Edit and restart the gateway to apply changes.
+      N4UGHTYLLM_GATE_DOCKER_UPSTREAMS: "${N4UGHTYLLM_GATE_DOCKER_UPSTREAMS:-8317:cli-proxy-api,8080:sub2api,3000:aiclient2api}"
+    volumes:
+      - ./logs:/app/logs:rw
+      - ./config:/app/n4ughtyllm_gate/policies/rules:rw
+      - ./config:/app/config:rw
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+networks:
+  cliproxy_net:
+    external: true
+    name: ${CLIPROXY_NETWORK:-cliproxyapi_default}
+  sub2api_net:
+    external: true
+    name: ${SUB2API_NETWORK:-sub2api-deploy_sub2api-network}
