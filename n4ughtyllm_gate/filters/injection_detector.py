@@ -1,0 +1,611 @@
+"""Prompt injection detector aligned with OWASP guidance.
+
+Detection rules are externalized to YAML to support bilingual customization.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import re
+import string
+import unicodedata
+from collections import OrderedDict
+from typing import Any, TypedDict
+from urllib.parse import unquote
+
+from n4ughtyllm_gate.config.security_level import apply_threshold, normalize_security_level
+from n4ughtyllm_gate.config.security_rules import load_security_rules
+from n4ughtyllm_gate.core.context import RequestContext
+from n4ughtyllm_gate.core.models import InternalRequest, InternalResponse
+from n4ughtyllm_gate.filters.base import BaseFilter
+from n4ughtyllm_gate.util.logger import logger
+from n4ughtyllm_gate.util.risk_scoring import clamp01, weighted_nonlinear_score
+
+
+_DEFAULT_INVISIBLE_CHARS = {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad"}
+_DEFAULT_BIDI_CHARS = {"\u202a", "\u202b", "\u202d", "\u202e", "\u202c", "\u2066", "\u2067", "\u2068", "\u2069"}
+_WHITESPACE_RE = re.compile(r"\s+")
+_WORD_SPLIT_RE = re.compile(r"\S+")
+# Latin/Common/Inherited scripts are expected in normal multilingual text;
+# mixing two *different* non-Latin scripts in the same word is suspicious.
+_BENIGN_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL"})
+# For message-level script diversity: scripts that are expected in normal text.
+_COMMON_SCRIPT_PREFIXES = frozenset({"LATIN", "DIGIT", "CJK", "HIRAGANA", "KATAKANA", "HANGUL", "FULLWIDTH"})
+
+# 每 3 个字符插入 "-" 以变形展示，防止日志本身被利用
+_DEFORM_CHUNK_SIZE = 3
+
+
+class ScanDiagnostics(TypedDict):
+    text_raw_len: int
+    text_norm_len: int
+    unicode_invisible_count: int
+    unicode_bidi_count: int
+    discussion_context: bool
+
+
+def _deform_text(text: str) -> str:
+    """每 3 个字符插入 '-'，用于安全日志展示。"""
+    return "-".join(text[i:i + _DEFORM_CHUNK_SIZE] for i in range(0, len(text), _DEFORM_CHUNK_SIZE))
+
+
+def _extract_match_context(text: str, match: re.Match, context_chars: int = 20) -> str:
+    """提取匹配片段及前后 N 个字符，并变形展示。"""
+    start = max(0, match.start() - context_chars)
+    end = min(len(text), match.end() + context_chars)
+    excerpt = text[start:end]
+    return _deform_text(excerpt)
+
+
+def _detect_script_mixing(text: str, *, min_scripts: int = 2) -> list[str]:
+    """Detect words that mix characters from multiple non-Latin alphabetic scripts."""
+    hits: list[str] = []
+    for word in _WORD_SPLIT_RE.findall(text):
+        if len(word) < 4:
+            continue
+        exotic_scripts: set[str] = set()
+        for ch in word:
+            if not ch.isalpha():
+                continue
+            try:
+                name = unicodedata.name(ch, "")
+            except ValueError:
+                continue
+            if not name:
+                continue
+            script_prefix = name.split()[0]
+            if script_prefix not in _BENIGN_SCRIPT_PREFIXES:
+                exotic_scripts.add(script_prefix)
+        if len(exotic_scripts) >= min_scripts:
+            hits.append(word)
+    return hits
+
+
+def _detect_message_script_diversity(text: str) -> set[str]:
+    """Detect unusual script diversity at message level.
+
+    Returns the set of uncommon script prefixes found.  When the message
+    contains characters from 3+ distinct non-common scripts (e.g. Armenian +
+    Gujarati + Georgian in a single message), this is a strong noise-injection
+    signal even if each *word* uses only one script.
+    """
+    exotic_scripts: set[str] = set()
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        try:
+            name = unicodedata.name(ch, "")
+        except ValueError:
+            continue
+        if not name:
+            continue
+        script_prefix = name.split()[0]
+        if script_prefix not in _COMMON_SCRIPT_PREFIXES:
+            exotic_scripts.add(script_prefix)
+    return exotic_scripts
+
+
+def _maybe_decode_base64(token: str) -> str | None:
+    try:
+        raw = base64.b64decode(token, validate=True)
+        decoded = raw.decode("utf-8", errors="ignore")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+
+    if not decoded:
+        return None
+
+    printable_ratio = sum(ch in string.printable for ch in decoded) / len(decoded)
+    if printable_ratio < 0.8:
+        return None
+
+    return decoded
+
+
+def _maybe_decode_hex(token: str) -> str | None:
+    if len(token) % 2 != 0:
+        return None
+    try:
+        raw = binascii.unhexlify(token)
+        decoded = raw.decode("utf-8", errors="ignore")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if not decoded:
+        return None
+    return decoded
+
+
+def _is_typoglycemia_variant(word: str, target: str) -> bool:
+    if word == target or len(word) != len(target):
+        return False
+    if len(word) < 4:
+        return False
+    if word[0] != target[0] or word[-1] != target[-1]:
+        return False
+    return sorted(word[1:-1]) == sorted(target[1:-1])
+
+
+class PromptInjectionDetector(BaseFilter):
+    name = "injection_detector"
+
+    _MAX_LOGGED = 512  # prevent unbounded growth across many requests
+
+    def __init__(self) -> None:
+        self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": {}, "risk_model": {}}
+        self._logged_response_ids: OrderedDict[str, None] = OrderedDict()
+
+        rules = load_security_rules()
+        detector_rules = rules.get("injection_detector", {})
+        action_map = rules.get("action_map", {}).get(self.name, {})
+
+        self._base64_candidate_re = re.compile(detector_rules.get("base64_candidate_regex", r"[A-Za-z0-9+/]{24,}={0,2}"))
+        self._hex_candidate_re = re.compile(detector_rules.get("hex_candidate_regex", r"\b[0-9a-fA-F]{32,}\b"))
+        self._word_re = re.compile(detector_rules.get("word_regex", r"\b[a-z]{4,}\b"))
+        self._base64_max_candidates = int(detector_rules.get("base64_max_candidates", 8))
+        self._hex_max_candidates = int(detector_rules.get("hex_max_candidates", 8))
+
+        multi_decode = detector_rules.get("multi_stage_decode", {})
+        self._multi_decode_enabled = bool(multi_decode.get("enabled", True))
+        self._max_decode_depth = max(1, int(multi_decode.get("max_decode_depth", 2)))
+        self._url_decode_enabled = bool(multi_decode.get("url_decode_enabled", True))
+
+        self._direct_patterns = self._compile_rule_patterns(detector_rules.get("direct_patterns", []))
+        self._system_exfil_patterns = self._compile_rule_patterns(detector_rules.get("system_exfil_patterns", []))
+        self._html_md_patterns = self._compile_rule_patterns(detector_rules.get("html_markdown_patterns", []))
+        self._remote_content_patterns = self._compile_rule_patterns(detector_rules.get("remote_content_patterns", []))
+        self._indirect_injection_patterns = self._compile_rule_patterns(detector_rules.get("indirect_injection_patterns", []))
+        self._remote_instruction_patterns = self._compile_rule_patterns(
+            detector_rules.get("remote_content_instruction_patterns", [])
+        )
+        self._tool_call_injection_patterns = self._compile_rule_patterns(
+            detector_rules.get("tool_call_injection_patterns", [])
+        )
+
+        self._spam_noise_patterns = self._compile_rule_patterns(detector_rules.get("spam_noise_patterns", []))
+        self._spam_noise_min_hits = max(1, int(detector_rules.get("spam_noise_min_distinct_hits", 2)))
+        self._msg_script_diversity_threshold = max(2, int(detector_rules.get("message_script_diversity_threshold", 3)))
+
+        self._typoglycemia_targets = [str(item).lower() for item in detector_rules.get("typoglycemia_targets", [])]
+        self._decoded_keywords = [str(item).lower() for item in detector_rules.get("decoded_keywords", [])]
+        self._obfuscated_markers = [str(item).lower() for item in detector_rules.get("obfuscated_markers", [])]
+
+        self._confusable_map = {
+            str(src): str(dst)
+            for src, dst in (detector_rules.get("unicode_confusable_map", {}) or {}).items()
+        }
+        self._invisible_chars = set(detector_rules.get("unicode_invisible_chars", [])) or set(_DEFAULT_INVISIBLE_CHARS)
+        self._bidi_chars = set(detector_rules.get("unicode_bidi_chars", [])) or set(_DEFAULT_BIDI_CHARS)
+
+        scoring_model = detector_rules.get("scoring_model", {})
+        level = normalize_security_level()
+        self._nonlinear_k = float(scoring_model.get("nonlinear_k", 2.2))
+        self._risk_thresholds = {
+            "allow": apply_threshold(float(scoring_model.get("thresholds", {}).get("allow", 0.35)), level=level),
+            "review": apply_threshold(float(scoring_model.get("thresholds", {}).get("review", 0.7)), level=level),
+        }
+        self._risk_weights = {
+            str(key): float(value)
+            for key, value in (scoring_model.get("weights", {"intent": 0.45, "payload": 0.25, "hijack": 0.2, "anomaly": 0.1}).items())
+        }
+
+        self._signal_profiles: dict[str, tuple[str, float]] = {}
+        for signal_key, profile in (scoring_model.get("signal_profiles", {}) or {}).items():
+            bucket = str(profile.get("bucket", "intent"))
+            severity = clamp01(float(profile.get("severity", 7)) / 10.0)
+            self._signal_profiles[str(signal_key)] = (bucket, severity)
+
+        mitigation = detector_rules.get("false_positive_mitigation", {})
+        self._mitigation_enabled = bool(mitigation.get("enabled", True))
+        self._max_risk_reduction = clamp01(float(mitigation.get("max_risk_reduction", 0.35)))
+        self._non_reducible_categories = {str(item) for item in mitigation.get("non_reducible_categories", [])}
+        self._discussion_patterns = self._compile_pattern_list(mitigation.get("discussion_patterns", []))
+        self._quoted_instruction_patterns = self._compile_pattern_list(mitigation.get("quoted_instruction_patterns", []))
+
+        self._action_map = {str(key): str(value) for key, value in action_map.items()}
+
+    @staticmethod
+    def _compile_rule_patterns(items: list[dict]) -> dict[str, re.Pattern[str]]:
+        compiled: dict[str, re.Pattern[str]] = {}
+        for item in items:
+            rule_id = str(item.get("id", "rule"))
+            regex = item.get("regex")
+            if not regex:
+                continue
+            try:
+                compiled[rule_id] = re.compile(regex, re.IGNORECASE)
+            except re.error as exc:
+                logger.warning("injection_detector: invalid regex in rule %s: %s", rule_id, exc)
+        return compiled
+
+    @staticmethod
+    def _compile_pattern_list(items: list[str]) -> list[re.Pattern[str]]:
+        compiled: list[re.Pattern[str]] = []
+        for item in items:
+            if not item:
+                continue
+            try:
+                compiled.append(re.compile(str(item), re.IGNORECASE))
+            except re.error as exc:
+                logger.warning("injection_detector: invalid pattern %r: %s", item, exc)
+        return compiled
+
+    def _normalize_text(self, text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", text)
+        if self._confusable_map:
+            normalized = "".join(self._confusable_map.get(char, char) for char in normalized)
+        normalized = "".join(char for char in normalized if char not in self._invisible_chars and char not in self._bidi_chars)
+        normalized = normalized.lower()
+        return _WHITESPACE_RE.sub(" ", normalized).strip()
+
+    def _decode_multistage(self, token: str) -> list[str]:
+        if not self._multi_decode_enabled:
+            return []
+
+        discovered: set[str] = set()
+        frontier = [token]
+
+        for _ in range(self._max_decode_depth):
+            next_frontier: list[str] = []
+            for candidate in frontier:
+                decoded_items: list[str] = []
+
+                base64_decoded = _maybe_decode_base64(candidate)
+                if base64_decoded:
+                    decoded_items.append(base64_decoded)
+
+                hex_decoded = _maybe_decode_hex(candidate)
+                if hex_decoded:
+                    decoded_items.append(hex_decoded)
+
+                if self._url_decode_enabled:
+                    url_decoded = unquote(candidate)
+                    if url_decoded != candidate:
+                        decoded_items.append(url_decoded)
+
+                for item in decoded_items:
+                    if item not in discovered:
+                        discovered.add(item)
+                        next_frontier.append(item)
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        return list(discovered)
+
+    def _scan_text(self, text: str) -> tuple[dict[str, list[str]], ScanDiagnostics]:
+        text_raw = text
+        text_nfkc = unicodedata.normalize("NFKC", text_raw)
+        text_norm = self._normalize_text(text_nfkc)
+        condensed = re.sub(r"[\s\W_]+", "", text_norm)
+
+        signals: dict[str, set[str]] = {
+            "direct": set(),
+            "system_exfil": set(),
+            "obfuscated": set(),
+            "html_markdown": set(),
+            "typoglycemia": set(),
+            "remote_content": set(),
+            "remote_content_instruction": set(),
+            "indirect_injection": set(),
+            "tool_call_injection": set(),
+        }
+
+        invisible_hits = sorted({f"U+{ord(char):04X}" for char in text_nfkc if char in self._invisible_chars})
+        bidi_hits = sorted({f"U+{ord(char):04X}" for char in text_nfkc if char in self._bidi_chars})
+        if invisible_hits:
+            signals["unicode_invisible"] = set(invisible_hits)
+        if bidi_hits:
+            signals["unicode_bidi"] = set(bidi_hits)
+
+        for label, pattern in self._direct_patterns.items():
+            if pattern.search(text_norm):
+                signals["direct"].add(label)
+
+        for label, pattern in self._system_exfil_patterns.items():
+            if pattern.search(text_norm):
+                signals["system_exfil"].add(label)
+
+        for label, pattern in self._html_md_patterns.items():
+            if pattern.search(text_nfkc):
+                signals["html_markdown"].add(label)
+
+        for label, pattern in self._remote_content_patterns.items():
+            if pattern.search(text_norm):
+                signals["remote_content"].add(label)
+
+        for label, pattern in self._indirect_injection_patterns.items():
+            if pattern.search(text_norm):
+                signals["indirect_injection"].add(label)
+
+        for label, pattern in self._remote_instruction_patterns.items():
+            if pattern.search(text_norm):
+                signals["remote_content_instruction"].add(label)
+
+        for label, pattern in self._tool_call_injection_patterns.items():
+            nfkc_match = pattern.search(text_nfkc)
+            matched_text = text_nfkc if nfkc_match else text_norm
+            match = nfkc_match or pattern.search(text_norm)
+            if match:
+                signals["tool_call_injection"].add(label)
+                deformed = _extract_match_context(matched_text, match)
+                logger.warning(
+                    "tool_call_injection_hit rule=%s excerpt=%s",
+                    label,
+                    deformed,
+                )
+
+        # --- Spam noise detection ---
+        spam_hits: set[str] = set()
+        for label, pattern in self._spam_noise_patterns.items():
+            if pattern.search(text_nfkc) or pattern.search(text_norm):
+                spam_hits.add(label)
+        if len(spam_hits) >= self._spam_noise_min_hits:
+            signals["spam_noise"] = spam_hits
+
+        # --- Message-level script diversity ---
+        exotic_scripts = _detect_message_script_diversity(text_raw)
+        if len(exotic_scripts) >= self._msg_script_diversity_threshold:
+            signals.setdefault("obfuscated", set()).add(
+                f"message_script_diversity({len(exotic_scripts)}:{','.join(sorted(exotic_scripts)[:5])})"
+            )
+
+        if any(marker and (marker in text_norm or marker in condensed) for marker in self._obfuscated_markers):
+            signals["obfuscated"].add("rule_obfuscation_marker")
+
+        script_mixing_hits = _detect_script_mixing(text_raw)
+        if script_mixing_hits:
+            signals["obfuscated"].add("multi_script_mixing")
+
+        decoded_texts: list[str] = []
+        for idx, match in enumerate(self._base64_candidate_re.finditer(text_nfkc)):
+            if idx >= self._base64_max_candidates:
+                break
+            decoded_texts.extend(self._decode_multistage(match.group(0)))
+
+        for idx, match in enumerate(self._hex_candidate_re.finditer(text_nfkc)):
+            if idx >= self._hex_max_candidates:
+                break
+            decoded_texts.extend(self._decode_multistage(match.group(0)))
+
+        for decoded in decoded_texts:
+            norm_decoded = self._normalize_text(decoded)
+            if any(keyword and keyword in norm_decoded for keyword in self._decoded_keywords):
+                signals["obfuscated"].add("encoded_payload")
+
+        for word in self._word_re.findall(text_norm):
+            for target in self._typoglycemia_targets:
+                if _is_typoglycemia_variant(word, target):
+                    signals["typoglycemia"].add(f"{target}->{word}")
+
+        signal_payload = {key: sorted(values) for key, values in signals.items() if values}
+        discussion_context = any(pattern.search(text_norm) for pattern in self._discussion_patterns) or any(
+            pattern.search(text_nfkc) for pattern in self._quoted_instruction_patterns
+        )
+        diagnostics: ScanDiagnostics = {
+            "text_raw_len": len(text_raw),
+            "text_norm_len": len(text_norm),
+            "unicode_invisible_count": len(invisible_hits),
+            "unicode_bidi_count": len(bidi_hits),
+            "discussion_context": discussion_context,
+        }
+        return signal_payload, diagnostics
+
+    @staticmethod
+    def _merge_signals(target: dict[str, set[str]], source: dict[str, list[str]]) -> None:
+        for key, values in source.items():
+            bucket = target.setdefault(key, set())
+            bucket.update(values)
+
+    @staticmethod
+    def _finalize_signals(signals: dict[str, set[str]]) -> dict[str, list[str]]:
+        return {key: sorted(values) for key, values in signals.items() if values}
+
+    def _score_signals(self, signals: dict[str, list[str]]) -> dict[str, Any]:
+        feature_scores = {key: 0.0 for key in self._risk_weights}
+        signal_breakdown: dict[str, dict[str, object]] = {}
+
+        for signal_name, hits in signals.items():
+            if not hits:
+                continue
+            bucket, severity = self._signal_profiles.get(signal_name, ("intent", 0.7))
+            feature_scores[bucket] = max(feature_scores.get(bucket, 0.0), severity)
+            signal_breakdown[signal_name] = {
+                "bucket": bucket,
+                "severity": round(severity, 4),
+                "hits": len(hits),
+            }
+
+        raw, score, contributions = weighted_nonlinear_score(feature_scores, self._risk_weights, self._nonlinear_k)
+        return {
+            "raw": raw,
+            "score": score,
+            "k": self._nonlinear_k,
+            "feature_scores": {key: round(value, 4) for key, value in feature_scores.items()},
+            "weights": self._risk_weights,
+            "contributions": contributions,
+            "signal_breakdown": signal_breakdown,
+        }
+
+    # Categories that are expected in normal AI output (the model quoting or
+    # explaining prompt-injection techniques).  On the *response* side these
+    # signals are treated as discussion context even when the surrounding text
+    # lacks explicit research/educational markers, to avoid over-blocking
+    # legitimate explanatory content.
+    _RESPONSE_SIDE_BENIGN_CATEGORIES: frozenset[str] = frozenset({"direct", "typoglycemia", "html_markdown"})
+
+    def _apply_action(
+        self, ctx: RequestContext, category: str, *, contextual_discussion: bool = False, phase: str = "request"
+    ) -> None:
+        action = self._action_map.get(category)
+        if not action:
+            return
+
+        # On the response side, certain categories are overwhelmingly
+        # educational/explanatory rather than adversarial.  Treat them as if
+        # discussion context is present to avoid penalising normal AI output.
+        effective_discussion = contextual_discussion or (
+            phase == "response" and category in self._RESPONSE_SIDE_BENIGN_CATEGORIES
+        )
+
+        if effective_discussion and action in {"block", "review", "downgrade", "sanitize"}:
+            action = "sanitize"
+
+        ctx.enforcement_actions.append(f"{self.name}:{category}:{action}")
+        if action == "block":
+            ctx.risk_score = max(ctx.risk_score, 0.95)
+            ctx.requires_human_review = True
+            if phase == "response":
+                ctx.response_disposition = "block"
+            else:
+                ctx.request_disposition = "block"
+            ctx.disposition_reasons.append(f"injection_{category}")
+        elif action in {"review", "sanitize"}:
+            ctx.risk_score = max(ctx.risk_score, 0.58 if contextual_discussion else 0.85)
+            ctx.requires_human_review = not contextual_discussion
+        elif action == "downgrade":
+            ctx.risk_score = max(ctx.risk_score, 0.62 if contextual_discussion else 0.82)
+
+    def process_request(self, req: InternalRequest, ctx: RequestContext) -> InternalRequest:
+        self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": {}, "risk_model": {}}
+        merged: dict[str, set[str]] = {}
+        diagnostics: dict[str, int] = {
+            "text_raw_len": 0,
+            "text_norm_len": 0,
+            "unicode_invisible_count": 0,
+            "unicode_bidi_count": 0,
+            "discussion_context_count": 0,
+        }
+
+        for msg in req.messages:
+            signals, text_diag = self._scan_text(msg.content)
+            self._merge_signals(merged, signals)
+            diagnostics["text_raw_len"] += int(text_diag["text_raw_len"])
+            diagnostics["text_norm_len"] += int(text_diag["text_norm_len"])
+            diagnostics["unicode_invisible_count"] += int(text_diag["unicode_invisible_count"])
+            diagnostics["unicode_bidi_count"] += int(text_diag["unicode_bidi_count"])
+            diagnostics["discussion_context_count"] += int(bool(text_diag.get("discussion_context")))
+
+        signals = self._finalize_signals(merged)
+        if signals:
+            risk_model = self._score_signals(signals)
+            risk_score = float(risk_model["score"])
+            contextual_discussion = diagnostics["discussion_context_count"] > 0 and self._mitigation_enabled
+            if contextual_discussion and not any(category in self._non_reducible_categories for category in signals):
+                mitigation_factor = 1.0 - self._max_risk_reduction
+                risk_score = round(risk_score * mitigation_factor, 6)
+                ctx.security_tags.add("injection_discussion_context")
+                risk_model["mitigation"] = {
+                    "applied": True,
+                    "factor": mitigation_factor,
+                    "max_reduction": self._max_risk_reduction,
+                }
+            else:
+                risk_model["mitigation"] = {"applied": False}
+
+            ctx.risk_score = max(ctx.risk_score, risk_score)
+            for category in signals:
+                ctx.security_tags.add(f"injection_{category}")
+                self._apply_action(ctx, category, contextual_discussion=contextual_discussion)
+
+            if ctx.risk_score >= self._risk_thresholds["review"]:
+                ctx.requires_human_review = True
+
+            self._report = {
+                "filter": self.name,
+                "hit": True,
+                "risk_score": ctx.risk_score,
+                "signals": signals,
+                "risk_model": risk_model,
+                "diagnostics": diagnostics,
+            }
+            logger.info("injection detected request_id=%s categories=%s", ctx.request_id, sorted(signals.keys()))
+
+        return req
+
+    def process_response(self, resp: InternalResponse, ctx: RequestContext) -> InternalResponse:
+        self._report = {"filter": self.name, "hit": False, "risk_score": 0.0, "signals": {}, "risk_model": {}}
+
+        # Scan both output_text and structured tool call arguments.
+        merged_signals: dict[str, set[str]] = {}
+        signals, diagnostics = self._scan_text(resp.output_text)
+        self._merge_signals(merged_signals, signals)
+
+        tc_content = resp.tool_call_content
+        if tc_content:
+            tc_signals, tc_diag = self._scan_text(tc_content)
+            self._merge_signals(merged_signals, tc_signals)
+            diagnostics["text_raw_len"] = int(diagnostics["text_raw_len"]) + int(tc_diag["text_raw_len"])
+            diagnostics["text_norm_len"] = int(diagnostics["text_norm_len"]) + int(tc_diag["text_norm_len"])
+            diagnostics["unicode_invisible_count"] = int(diagnostics["unicode_invisible_count"]) + int(tc_diag["unicode_invisible_count"])
+            diagnostics["unicode_bidi_count"] = int(diagnostics["unicode_bidi_count"]) + int(tc_diag["unicode_bidi_count"])
+            if tc_diag.get("discussion_context"):
+                diagnostics["discussion_context"] = True
+
+        signals = self._finalize_signals(merged_signals)
+        if signals:
+            risk_model = self._score_signals(signals)
+            risk_score = float(risk_model["score"])
+            contextual_discussion = bool(diagnostics.get("discussion_context")) and self._mitigation_enabled
+            if contextual_discussion and not any(category in self._non_reducible_categories for category in signals):
+                mitigation_factor = 1.0 - self._max_risk_reduction
+                risk_score = round(risk_score * mitigation_factor, 6)
+                ctx.security_tags.add("response_injection_discussion_context")
+                risk_model["mitigation"] = {
+                    "applied": True,
+                    "factor": mitigation_factor,
+                    "max_reduction": self._max_risk_reduction,
+                }
+            else:
+                risk_model["mitigation"] = {"applied": False}
+
+            ctx.risk_score = max(ctx.risk_score, risk_score)
+            for category in signals:
+                ctx.security_tags.add(f"response_injection_{category}")
+                self._apply_action(ctx, category, contextual_discussion=contextual_discussion, phase="response")
+
+            if ctx.risk_score >= self._risk_thresholds["review"]:
+                ctx.requires_human_review = True
+
+            self._report = {
+                "filter": self.name,
+                "hit": True,
+                "risk_score": ctx.risk_score,
+                "signals": signals,
+                "risk_model": risk_model,
+                "diagnostics": diagnostics,
+            }
+            if ctx.request_id not in self._logged_response_ids:
+                self._logged_response_ids[ctx.request_id] = None
+                while len(self._logged_response_ids) > self._MAX_LOGGED:
+                    self._logged_response_ids.popitem(last=False)
+                logger.debug(
+                    "injection-like response detected request_id=%s categories=%s",
+                    ctx.request_id,
+                    sorted(signals.keys()),
+                )
+
+        return resp
+
+    def report(self) -> dict:
+        return self._report

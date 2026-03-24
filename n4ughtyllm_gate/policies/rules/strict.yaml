@@ -1,0 +1,13 @@
+enabled_filters:
+  - exact_value_redaction
+  - redaction
+  - request_sanitizer
+  - rag_poison_guard
+  - anomaly_detector
+  - injection_detector
+  - privilege_guard
+  - tool_call_guard
+  - restoration
+  - post_restore_guard
+  - output_sanitizer
+risk_threshold: 0.50

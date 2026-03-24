@@ -1,0 +1,16 @@
+enabled_filters:
+  - exact_value_redaction
+  - redaction
+  - system_prompt_guard
+  - untrusted_content_guard
+  - request_sanitizer
+  - rag_poison_guard
+  - anomaly_detector
+  - injection_detector
+  - privilege_guard
+  - tool_call_guard
+  - restoration
+  - post_restore_guard
+  - output_sanitizer
+# 0.85：仅较高风险时拦截，降低误拦（可改为 0.7 提高严格度）
+risk_threshold: 0.85
