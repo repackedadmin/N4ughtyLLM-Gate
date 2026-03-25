@@ -1,0 +1,21 @@
+{
+  "providers": {
+    "openai-main": {
+      "provider_id": "openai-main",
+      "display_name": "OpenAI Main",
+      "upstream_base": "https://api.openai.com/v1",
+      "api_type": "openai",
+      "api_key_encrypted": "",
+      "auth_mode": "bearer",
+      "auth_header_name": "authorization",
+      "enabled": true,
+      "priority": 100,
+      "timeout_seconds": 600.0,
+      "health_path": "/models",
+      "default_headers": {},
+      "model_allowlist": [],
+      "metadata": {},
+      "updated_at": 0
+    }
+  }
+}

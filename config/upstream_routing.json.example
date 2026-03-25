@@ -1,0 +1,29 @@
+{
+  "model_groups": {
+    "gpt5-production": {
+      "group_id": "gpt5-production",
+      "enabled": true,
+      "model_patterns": [
+        "gpt-5*",
+        "o*"
+      ],
+      "strategy": "weighted",
+      "providers": [
+        {
+          "provider_id": "openai-main",
+          "weight": 8,
+          "priority": 100
+        },
+        {
+          "provider_id": "openai-backup",
+          "weight": 2,
+          "priority": 100
+        }
+      ],
+      "metadata": {
+        "owner": "platform"
+      },
+      "updated_at": 0
+    }
+  }
+}

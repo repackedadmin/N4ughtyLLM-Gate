@@ -12,12 +12,14 @@ The actual logic lives in:
 from __future__ import annotations
 
 import hmac
+import json
 import re
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -113,6 +115,24 @@ from n4ughtyllm_gate.core.gw_tokens import (
     unregister as gw_tokens_unregister,
     update as gw_tokens_update,
 )
+from n4ughtyllm_gate.core.upstream_registry import (
+    check_provider_health,
+    delete_provider,
+    delete_model_group_policy,
+    get_provider,
+    get_model_group_policy,
+    get_provider_health_state,
+    list_provider_health_states,
+    list_providers,
+    list_model_group_policies,
+    load_providers,
+    load_routing_policies,
+    reset_provider_circuit,
+    resolve_provider_for_model_group,
+    resolve_provider_route,
+    upsert_model_group_policy,
+    upsert_provider,
+)
 from n4ughtyllm_gate.init_config import assert_security_bootstrap_ready, ensure_config_dir
 from n4ughtyllm_gate.observability.logging import configure_logging
 from n4ughtyllm_gate.observability.metrics import inc_request, observe_request_duration
@@ -135,6 +155,7 @@ from n4ughtyllm_gate.util.redaction_whitelist import normalize_whitelist_keys
 # /v1/__gw__/t/{token}__passthrough/chat/completions -> passthrough mode
 # /v2/__gw__/t/{token}/proxy -> /v2/proxy
 _GW_TOKEN_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/t/([^/]+?)(?:__([a-z]+))?(?:/(.*))?$")
+_GW_PROVIDER_PATH_RE = re.compile(r"^/(v1|v2)/__gw__/p/([^/]+?)(?:__([a-z]+))?(?:/(.*))?$")
 _VALID_FILTER_MODES = frozenset({"redact", "passthrough"})
 
 _confirmation_cache_task: ConfirmationCacheTask | None = None
@@ -156,6 +177,9 @@ def _observability_route_label(path: str) -> str:
     matched = _GW_TOKEN_PATH_RE.match(path)
     if matched:
         return f"token_{matched.group(1)}"
+    provider_match = _GW_PROVIDER_PATH_RE.match(path)
+    if provider_match:
+        return f"provider_{provider_match.group(1)}"
     if path == "/":
         return "root"
     if path == "/health":
@@ -306,6 +330,14 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     except Exception as exc:  # pragma: no cover
         logger.warning("gw_tokens load on startup failed: %s", exc)
     try:
+        load_providers()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("upstream providers load on startup failed: %s", exc)
+    try:
+        load_routing_policies()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("upstream routing policies load on startup failed: %s", exc)
+    try:
         gw_tokens_inject_docker_upstreams()
     except Exception as exc:  # pragma: no cover
         logger.warning("docker_upstreams inject failed: %s", exc)
@@ -397,8 +429,9 @@ class GWTokenRewriteMiddleware:
             return
 
         path = str(scope.get("path") or "/")
-        matched = _GW_TOKEN_PATH_RE.match(path)
-        if not matched:
+        token_match = _GW_TOKEN_PATH_RE.match(path)
+        provider_match = _GW_PROVIDER_PATH_RE.match(path)
+        if not token_match and not provider_match:
             await self.app(scope, receive, send)
             return
 
@@ -406,12 +439,24 @@ class GWTokenRewriteMiddleware:
         started_at = time.perf_counter()
         method = str(scope.get("method") or "GET").upper()
 
-        version, token, filter_mode, rest = (
-            matched.group(1),
-            matched.group(2),
-            matched.group(3),
-            matched.group(4),
-        )
+        if token_match:
+            version, principal, filter_mode, rest = (
+                token_match.group(1),
+                token_match.group(2),
+                token_match.group(3),
+                token_match.group(4),
+            )
+            principal_kind = "token"
+        else:
+            assert provider_match is not None
+            version, principal, filter_mode, rest = (
+                provider_match.group(1),
+                provider_match.group(2),
+                provider_match.group(3),
+                provider_match.group(4),
+            )
+            principal_kind = "provider"
+
         # Validate filter_mode suffix
         if filter_mode and filter_mode not in _VALID_FILTER_MODES:
             with trace_span(
@@ -437,41 +482,90 @@ class GWTokenRewriteMiddleware:
                 await response(scope, receive, send)
                 return
 
-        mapping = gw_tokens_get(token)
-        if not mapping:
-            logger.warning("gw_token not found token=%s path=%s", token, path)
-            with trace_span(
-                "gateway.request",
-                http_method=method,
-                http_route=route_label,
-            ) as span:
-                response = JSONResponse(
-                    status_code=404,
-                    content={
-                        "error": "token_not_found",
-                        "detail": "token invalid or expired",
-                    },
-                )
-                _record_request_observability(
-                    method=method,
-                    route_label=route_label,
-                    started_at=started_at,
-                    status_code=response.status_code,
-                    reject_reason="token_not_found",
-                    span=span,
-                )
-                await response(scope, receive, send)
-                return
+        mapping: dict[str, Any] | None = None
+        provider_headers: dict[str, str] = {}
+        if principal_kind == "token":
+            mapping = gw_tokens_get(principal)
+            if not mapping:
+                logger.warning("gw_token not found token=%s path=%s", principal, path)
+                with trace_span(
+                    "gateway.request",
+                    http_method=method,
+                    http_route=route_label,
+                ) as span:
+                    response = JSONResponse(
+                        status_code=404,
+                        content={
+                            "error": "token_not_found",
+                            "detail": "token invalid or expired",
+                        },
+                    )
+                    _record_request_observability(
+                        method=method,
+                        route_label=route_label,
+                        started_at=started_at,
+                        status_code=response.status_code,
+                        reject_reason="token_not_found",
+                        span=span,
+                    )
+                    await response(scope, receive, send)
+                    return
+        else:
+            try:
+                base, provider_headers = resolve_provider_route(principal)
+                mapping = {"upstream_base": base, "whitelist_key": []}
+            except KeyError:
+                with trace_span(
+                    "gateway.request",
+                    http_method=method,
+                    http_route=route_label,
+                ) as span:
+                    response = JSONResponse(
+                        status_code=404,
+                        content={"error": "provider_not_found", "detail": "unknown upstream provider id"},
+                    )
+                    _record_request_observability(
+                        method=method,
+                        route_label=route_label,
+                        started_at=started_at,
+                        status_code=response.status_code,
+                        reject_reason="provider_not_found",
+                        span=span,
+                    )
+                    await response(scope, receive, send)
+                    return
+            except PermissionError as exc:
+                with trace_span(
+                    "gateway.request",
+                    http_method=method,
+                    http_route=route_label,
+                ) as span:
+                    response = JSONResponse(
+                        status_code=403,
+                        content={"error": str(exc), "detail": "provider is disabled or restricted"},
+                    )
+                    _record_request_observability(
+                        method=method,
+                        route_label=route_label,
+                        started_at=started_at,
+                        status_code=response.status_code,
+                        reject_reason=str(exc),
+                        span=span,
+                    )
+                    await response(scope, receive, send)
+                    return
 
         new_path = f"/{version}/{rest}" if rest else f"/{version}"
         logger.debug(
-            "gw_token_rewrite path=%s -> %s token=%s… mode=%s",
+            "gw_rewrite kind=%s path=%s -> %s principal=%s… mode=%s",
+            principal_kind,
             path,
             new_path,
-            token[:6],
+            principal[:6],
             filter_mode or "default",
         )
 
+        assert mapping is not None
         ub = mapping["upstream_base"]
         wk = normalize_whitelist_keys(mapping.get("whitelist_key"))
         new_scope = dict(scope)
@@ -479,8 +573,11 @@ class GWTokenRewriteMiddleware:
         new_scope["root_path"] = ""
         new_scope["raw_path"] = new_path.encode("utf-8")
         new_scope["n4ughtyllm_gate_token_authenticated"] = True
-        new_scope["n4ughtyllm_gate_gateway_token"] = token
+        new_scope["n4ughtyllm_gate_gateway_token"] = principal if principal_kind == "token" else ""
+        new_scope["n4ughtyllm_gate_provider_id"] = principal if principal_kind == "provider" else ""
         new_scope["n4ughtyllm_gate_upstream_base"] = ub
+        if provider_headers:
+            new_scope["n4ughtyllm_gate_upstream_headers"] = provider_headers
         new_scope["n4ughtyllm_gate_redaction_whitelist_keys"] = wk
         new_scope["n4ughtyllm_gate_filter_mode"] = filter_mode  # None | "redact" | "passthrough"
 
@@ -667,7 +764,13 @@ async def security_boundary_middleware(request: Request, call_next):
                 )
                 return await finish_drain("loopback_only_reject", 403)
 
-        if request.url.path in _ADMIN_ENDPOINTS and method == "POST":
+        is_admin_api = (
+            request.url.path in _ADMIN_ENDPOINTS
+            or request.url.path.startswith("/__gw__/providers")
+            or request.url.path.startswith("/__gw__/routing")
+            or request.url.path.startswith("/__gw__/circuit")
+        )
+        if is_admin_api and method in {"POST", "PUT", "PATCH", "DELETE", "GET"}:
             client_ip = _real_client_ip(request)
             if not _admin_rate_limiter.is_allowed(client_ip):
                 logger.warning(
@@ -691,6 +794,31 @@ async def security_boundary_middleware(request: Request, call_next):
                     403,
                     "admin endpoint only allowed from internal network",
                 )
+
+        if not bool(request.scope.get("n4ughtyllm_gate_token_authenticated")):
+            provider_header = (request.headers.get("x-n4ughtyllm-gate-provider") or "").strip()
+            if provider_header:
+                model_hint = (request.headers.get("x-n4ughtyllm-gate-model") or "").strip()
+                try:
+                    resolved_base, provider_headers = resolve_provider_route(
+                        provider_id=provider_header, model=model_hint
+                    )
+                    request.scope["n4ughtyllm_gate_upstream_base"] = resolved_base
+                    request.scope["n4ughtyllm_gate_upstream_headers"] = provider_headers
+                    request.scope["n4ughtyllm_gate_provider_id"] = provider_header
+                    request.scope["n4ughtyllm_gate_token_authenticated"] = True
+                except KeyError:
+                    return await finish_drain(
+                        "provider_not_found",
+                        404,
+                        "unknown upstream provider id",
+                    )
+                except PermissionError as exc:
+                    return await finish_drain(
+                        str(exc),
+                        403,
+                        "provider is disabled or model is not allowed",
+                    )
 
         protected_v1 = request.url.path == "/v1" or request.url.path.startswith("/v1/")
         protected_v2 = request.url.path == "/v2" or request.url.path.startswith("/v2/")
@@ -718,6 +846,35 @@ async def security_boundary_middleware(request: Request, call_next):
                 request.scope["n4ughtyllm_gate_token_authenticated"] = True
                 logger.debug("using default upstream for v1 path=%s", request.url.path)
             else:
+                model_hint = await _extract_model_hint_from_body(request)
+                try:
+                    (
+                        routed_provider_id,
+                        routed_base,
+                        routed_headers,
+                        routing_meta,
+                    ) = resolve_provider_for_model_group(
+                        model=model_hint,
+                        tenant_id="default",
+                        request_id=(request.headers.get("x-n4ughtyllm-gate-request-id") or "").strip(),
+                    )
+                    request.scope["n4ughtyllm_gate_upstream_base"] = routed_base
+                    request.scope["n4ughtyllm_gate_upstream_headers"] = routed_headers
+                    request.scope["n4ughtyllm_gate_provider_id"] = routed_provider_id
+                    request.scope["n4ughtyllm_gate_token_authenticated"] = True
+                    request.scope["n4ughtyllm_gate_routing_group_id"] = routing_meta.get("group_id")
+                    request.scope["n4ughtyllm_gate_routing_strategy"] = routing_meta.get("strategy")
+                    logger.info(
+                        "policy routing selected provider=%s model=%s group=%s strategy=%s path=%s",
+                        routed_provider_id,
+                        model_hint or "(empty)",
+                        routing_meta.get("group_id"),
+                        routing_meta.get("strategy"),
+                        request.url.path,
+                    )
+                except KeyError:
+                    pass
+            if not bool(request.scope.get("n4ughtyllm_gate_token_authenticated")):
                 client_ip = _real_client_ip(request)
                 logger.warning(
                     "boundary reject non-token request path=%s client=%s hint=set N4UGHTYLLM_GATE_UPSTREAM_BASE_URL or use token path",
@@ -1151,6 +1308,354 @@ async def gw_unregister(request: Request) -> JSONResponse:
     if gw_tokens_unregister(token):
         return JSONResponse(content={"ok": True, "message": "token removed"})
     return JSONResponse(status_code=404, content={"error": "token_not_found"})
+
+
+def _provider_payload_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    default_headers = body.get("default_headers")
+    if not isinstance(default_headers, dict):
+        default_headers = {}
+    model_allowlist = body.get("model_allowlist")
+    if not isinstance(model_allowlist, list):
+        model_allowlist = []
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        priority = int(body.get("priority") or 100)
+    except (TypeError, ValueError):
+        priority = 100
+    try:
+        timeout_seconds = float(body.get("timeout_seconds") or settings.upstream_timeout_seconds)
+    except (TypeError, ValueError):
+        timeout_seconds = float(settings.upstream_timeout_seconds)
+    return {
+        "provider_id": _string_field(body.get("provider_id")),
+        "display_name": _string_field(body.get("display_name")),
+        "upstream_base": _normalize_input_upstream_base(body.get("upstream_base")),
+        "api_type": _string_field(body.get("api_type")) or "openai",
+        "enabled": bool(body.get("enabled", True)),
+        "priority": priority,
+        "timeout_seconds": timeout_seconds,
+        "health_path": _string_field(body.get("health_path")) or "/models",
+        "default_headers": {str(k): str(v) for k, v in default_headers.items() if str(k).strip()},
+        "model_allowlist": [str(x).strip() for x in model_allowlist if str(x).strip()],
+        "metadata": metadata,
+        "api_key": body.get("api_key"),
+        "auth_mode": _string_field(body.get("auth_mode")) or "bearer",
+        "auth_header_name": _string_field(body.get("auth_header_name")) or "authorization",
+    }
+
+
+def _routing_policy_payload_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    providers_raw = body.get("providers")
+    providers: list[dict[str, Any]] = []
+    if isinstance(providers_raw, list):
+        for item in providers_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                weight = int(item.get("weight") or 1)
+            except (TypeError, ValueError):
+                weight = 1
+            try:
+                priority = int(item.get("priority") or 100)
+            except (TypeError, ValueError):
+                priority = 100
+            providers.append(
+                {
+                    "provider_id": _string_field(item.get("provider_id")),
+                    "weight": max(1, weight),
+                    "priority": max(0, priority),
+                }
+            )
+    patterns_raw = body.get("model_patterns")
+    model_patterns = [str(x).strip() for x in patterns_raw if str(x).strip()] if isinstance(patterns_raw, list) else ["*"]
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "group_id": _string_field(body.get("group_id")),
+        "model_patterns": model_patterns,
+        "strategy": _string_field(body.get("strategy")) or "failover",
+        "providers": providers,
+        "enabled": bool(body.get("enabled", True)),
+        "metadata": metadata,
+    }
+
+
+async def _extract_model_hint_from_body(request: Request) -> str:
+    if request.method.upper() not in {"POST", "PUT", "PATCH"}:
+        return ""
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return ""
+    try:
+        raw = await request.body()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    model = parsed.get("model")
+    if isinstance(model, str):
+        return model.strip()
+    target_model = parsed.get("target_model")
+    if isinstance(target_model, str):
+        return target_model.strip()
+    return ""
+
+
+@app.get("/__gw__/providers")
+async def gw_list_providers(request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    include_disabled = str(request.query_params.get("include_disabled", "true")).strip().lower() not in {"0", "false", "no"}
+    return JSONResponse(content={"providers": list_providers(include_disabled=include_disabled)})
+
+
+@app.post("/__gw__/providers")
+async def gw_upsert_provider(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    payload = _provider_payload_from_body(body)
+    if not payload["provider_id"] or not payload["upstream_base"]:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "provider_id and upstream_base are required"},
+        )
+    if _is_forbidden_upstream_base_example(payload["upstream_base"]):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "example_upstream_forbidden",
+                "detail": "upstream_base cannot be a documentation example URL; set your real upstream and retry.",
+            },
+        )
+    try:
+        provider = upsert_provider(**payload)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": "provider_persist_failed", "detail": str(exc)})
+    return JSONResponse(content={"provider": provider})
+
+
+@app.get("/__gw__/providers/{provider_id}")
+async def gw_get_provider(provider_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    provider = get_provider(provider_id)
+    if not provider:
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    return JSONResponse(content={"provider": provider})
+
+
+@app.delete("/__gw__/providers/{provider_id}")
+async def gw_delete_provider(provider_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    if not delete_provider(provider_id):
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/__gw__/providers/{provider_id}/health")
+async def gw_provider_health(provider_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    try:
+        status = await check_provider_health(provider_id)
+    except KeyError:
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    return JSONResponse(content=status)
+
+
+@app.get("/__gw__/routing-policies")
+async def gw_list_routing_policies(request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    include_disabled = str(request.query_params.get("include_disabled", "true")).strip().lower() not in {"0", "false", "no"}
+    return JSONResponse(content={"model_groups": list_model_group_policies(include_disabled=include_disabled)})
+
+
+@app.post("/__gw__/routing-policies")
+async def gw_upsert_routing_policy(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    if not _verify_admin_gateway_key(body):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    payload = _routing_policy_payload_from_body(body)
+    if not payload["group_id"] or not payload["providers"]:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "missing_params", "detail": "group_id and providers are required"},
+        )
+    try:
+        policy = upsert_model_group_policy(**payload)
+    except KeyError as exc:
+        return JSONResponse(status_code=400, content={"error": "providers_not_found", "detail": str(exc)})
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": "routing_policy_persist_failed", "detail": str(exc)})
+    return JSONResponse(content={"model_group": policy})
+
+
+@app.get("/__gw__/routing-policies/{group_id}")
+async def gw_get_routing_policy(group_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    policy = get_model_group_policy(group_id)
+    if not policy:
+        return JSONResponse(status_code=404, content={"error": "model_group_not_found"})
+    return JSONResponse(content={"model_group": policy})
+
+
+@app.delete("/__gw__/routing-policies/{group_id}")
+async def gw_delete_routing_policy(group_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    if not delete_model_group_policy(group_id):
+        return JSONResponse(status_code=404, content={"error": "model_group_not_found"})
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/__gw__/circuit")
+async def gw_list_circuit_states(request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    return JSONResponse(content={"circuit_states": list_provider_health_states()})
+
+
+@app.get("/__gw__/circuit/{provider_id}")
+async def gw_get_circuit_state(provider_id: str, request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    state = get_provider_health_state(provider_id)
+    if state is None:
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    return JSONResponse(content={"circuit_state": state})
+
+
+@app.post("/__gw__/circuit/{provider_id}/reset")
+async def gw_reset_circuit(provider_id: str, request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except (TypeError, ValueError):
+        body = {}
+    if not _verify_admin_gateway_key(body):
+        gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+        if not gateway_key or not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+            )
+    if not reset_provider_circuit(provider_id):
+        return JSONResponse(status_code=404, content={"error": "provider_not_found"})
+    state = get_provider_health_state(provider_id) or {}
+    return JSONResponse(content={"ok": True, "circuit_state": state})
+
+
+@app.get("/__gw__/routing/resolve")
+async def gw_preview_route_resolution(request: Request) -> JSONResponse:
+    gateway_key = _string_field(request.headers.get(settings.gateway_key_header))
+    if not gateway_key:
+        gateway_key = _string_field(request.query_params.get("gateway_key"))
+    if not _verify_admin_gateway_key({"gateway_key": gateway_key}):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "gateway_key_invalid", "detail": "gateway_key does not match"},
+        )
+    model = _string_field(request.query_params.get("model"))
+    request_id = _string_field(request.query_params.get("request_id"))
+    try:
+        provider_id, upstream_base, _headers, meta = resolve_provider_for_model_group(
+            model=model,
+            tenant_id="default",
+            request_id=request_id,
+        )
+    except KeyError:
+        return JSONResponse(status_code=404, content={"error": "no_policy_provider_available"})
+    return JSONResponse(
+        content={
+            "model": model,
+            "provider_id": provider_id,
+            "upstream_base": upstream_base,
+            "routing": meta,
+            "health": get_provider_health_state(provider_id) or {},
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

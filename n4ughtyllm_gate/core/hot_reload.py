@@ -219,6 +219,21 @@ def reload_gw_tokens() -> None:
         logger.exception("hot_reload gw_tokens reload failed")
 
 
+def reload_upstream_providers() -> None:
+    """Reload native upstream provider registry from disk."""
+    try:
+        from n4ughtyllm_gate.core.upstream_registry import (
+            load_providers,
+            load_routing_policies,
+        )
+
+        load_providers()
+        load_routing_policies()
+        logger.info("hot_reload upstream providers reloaded")
+    except Exception:
+        logger.exception("hot_reload upstream providers reload failed")
+
+
 def reload_policy_cache() -> None:
     """Clear policy engine mtime cache so next resolve re-reads YAML."""
     try:
@@ -322,6 +337,11 @@ def build_watcher() -> HotReloader:
     if not tokens_path.is_absolute():
         tokens_path = Path.cwd() / tokens_path
     watcher.watch(tokens_path, "gw_tokens.json", reload_gw_tokens)
+
+    providers_path = Path.cwd() / "config" / "upstream_providers.json"
+    watcher.watch(providers_path, "upstream_providers.json", reload_upstream_providers)
+    routing_path = Path.cwd() / "config" / "upstream_routing.json"
+    watcher.watch(routing_path, "upstream_routing.json", reload_upstream_providers)
 
     # policy YAML files
     policies_dir = rules_path.parent

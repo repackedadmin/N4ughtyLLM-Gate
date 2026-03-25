@@ -70,11 +70,44 @@ Tokens from `POST /__gw__/register` are stored here (override path with `N4UGHTY
 - **Default Docker Compose:** `N4UGHTYLLM_GATE_GW_TOKENS_PATH=/app/n4ughtyllm_gate/policies/rules/gw_tokens.json` with `./config` mounted there → persists as `./config/gw_tokens.json` on the host.
 - Paths under `/tmp` may lose data on container restart.
 
+### 4. Native provider registry (`upstream_providers.json`)
+
+The gateway can manage first-party upstream providers directly (no external wrapper required).
+
+- File path: `config/upstream_providers.json` (schema example: `config/upstream_providers.json.example`).
+- Runtime APIs:
+  - `POST /__gw__/providers` (create/update)
+  - `GET /__gw__/providers`
+  - `GET /__gw__/providers/{provider_id}`
+  - `DELETE /__gw__/providers/{provider_id}`
+  - `GET /__gw__/providers/{provider_id}/health`
+- Route binding:
+  - `/v1/__gw__/p/{provider_id}/...`
+  - `/v2/__gw__/p/{provider_id}/...`
+  - or header `x-n4ughtyllm-gate-provider: <provider_id>`
+
+Provider `api_key` values are encrypted before persistence.
+
+### 5. Model-group routing policies (`upstream_routing.json`)
+
+Model-group policies provide automatic provider selection for direct `/v1/*` traffic when no token route, no explicit provider header, and no default upstream are set.
+
+- File path: `config/upstream_routing.json` (schema example: `config/upstream_routing.json.example`).
+- Runtime APIs:
+  - `POST /__gw__/routing-policies` (create/update)
+  - `GET /__gw__/routing-policies`
+  - `GET /__gw__/routing-policies/{group_id}`
+  - `DELETE /__gw__/routing-policies/{group_id}`
+  - `GET /__gw__/routing/resolve?model=...` (preview selected provider)
+- Strategies:
+  - `failover`: priority-based first healthy provider wins.
+  - `weighted`: weighted random selection across healthy providers.
+
 ---
 
 ### Hot reload
 
-- Watcher polls: `config/.env`, `security_filters.yaml`, policy YAML, `gw_tokens.json`.
+- Watcher polls: `config/.env`, `security_filters.yaml`, policy YAML, `gw_tokens.json`, `upstream_providers.json`, `upstream_routing.json`.
 - Rules YAML changes clear caches; the next request rebuilds the filter pipeline.
 - Only **some** `.env` fields hot-reload. Security-critical fields (`gateway_key`, `security_level`, `enforce_loopback_only`, HMAC settings, `trusted_proxy_ips`, `v2_block_internal_targets`, `local_ui_allow_internal_network`, etc.) require restart.
 - After changes in Compose or for long-lived streams, run `docker compose restart n4ughtyllm_gate` to be safe.

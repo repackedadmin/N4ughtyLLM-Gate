@@ -1,11 +1,10 @@
-"""
-上游解析、网关校验与 HTTP 转发。从 router 拆出，便于维护与单测。
-"""
+"""Upstream validation and HTTP forwarding helpers."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from contextvars import ContextVar
 from typing import Any, AsyncGenerator, Mapping
 from urllib.parse import urlparse, urlunparse
 
@@ -13,10 +12,25 @@ import httpx
 from fastapi import Request
 
 from n4ughtyllm_gate.config.settings import settings
+from n4ughtyllm_gate.core.upstream_registry import (
+    resolve_provider_route,
+    report_provider_success,
+    report_provider_failure,
+)
 from n4ughtyllm_gate.util.logger import logger
 from n4ughtyllm_gate.util.redaction_whitelist import normalize_whitelist_keys
 
-# 与 router 内路由前缀一致，用于从 request_path 剥掉网关前缀得到上游 path
+# ContextVar that carries the active provider_id through the async call chain so that
+# _forward_json / _forward_stream_lines can record success/failure without needing a
+# signature change at every call site.
+_active_provider_id: ContextVar[str] = ContextVar("n4ughtyllm_gate_active_provider", default="")
+
+
+def set_active_provider(provider_id: str) -> None:
+    """Set the provider_id that will be credited for the current async task's upstream calls."""
+    _active_provider_id.set((provider_id or "").strip())
+
+# Keep in sync with router prefix to normalize upstream path.
 GATEWAY_PREFIX = "/v1"
 
 _HOP_BY_HOP_HEADERS = {
@@ -97,7 +111,12 @@ def _trace_request_id(headers: Mapping[str, str]) -> str:
 
 
 def _effective_gateway_headers(request: Request) -> dict[str, str]:
-    """从请求中取 headers 供网关校验与转发使用（仅 Header，不含 Query）。"""
+    """Build effective headers for gateway forwarding.
+
+    Also arms the per-task ContextVar with the active provider_id so that
+    _forward_json / _forward_stream_lines can report circuit-breaker feedback
+    without receiving extra arguments.
+    """
     headers = dict(request.headers)
     injected_upstream_base = request.scope.get("n4ughtyllm_gate_upstream_base")
     if isinstance(injected_upstream_base, str) and injected_upstream_base.strip():
@@ -108,6 +127,16 @@ def _effective_gateway_headers(request: Request) -> dict[str, str]:
     injected_filter_mode = request.scope.get("n4ughtyllm_gate_filter_mode")
     if injected_filter_mode:
         headers["x-n4ughtyllm-gate-filter-mode"] = injected_filter_mode
+    injected_provider_headers = request.scope.get("n4ughtyllm_gate_upstream_headers")
+    if isinstance(injected_provider_headers, dict):
+        for key, value in injected_provider_headers.items():
+            k = str(key or "").strip()
+            if not k:
+                continue
+            headers[k] = str(value or "")
+    injected_provider_id = request.scope.get("n4ughtyllm_gate_provider_id")
+    if isinstance(injected_provider_id, str) and injected_provider_id.strip():
+        set_active_provider(injected_provider_id.strip())
     return headers
 
 
@@ -115,7 +144,12 @@ def _resolve_upstream_base(headers: Mapping[str, str]) -> str:
     raw = _header_value(headers, settings.upstream_base_header)
     if raw.strip():
         return _normalize_upstream_base(raw)
-    # 未提供 x-upstream-base 时使用默认上游（如 N4UGHTYLLM_GATE_UPSTREAM_BASE_URL=http://localhost:8317/v1）
+    provider_id = _header_value(headers, "x-n4ughtyllm-gate-provider")
+    model_hint = _header_value(headers, "x-n4ughtyllm-gate-model")
+    if provider_id.strip():
+        resolved, _headers = resolve_provider_route(provider_id=provider_id.strip(), model=model_hint.strip())
+        return _normalize_upstream_base(resolved)
+    # Fallback to default upstream when explicit upstream base is absent.
     default = (settings.upstream_base_url or "").strip()
     if not default:
         raise ValueError("missing_upstream_base")
@@ -218,15 +252,25 @@ def _safe_error_detail(payload: dict[str, Any] | str) -> str:
 async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str, str]) -> tuple[int, dict[str, Any] | str]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     trace_request_id = _trace_request_id(headers)
+    provider_id = _active_provider_id.get()
     logger.debug("forward_json start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
     client = await _get_upstream_async_client()
     try:
         response = await client.post(url=url, content=body, headers=dict(headers))
         logger.debug("forward_json done request_id=%s url=%s status=%s", trace_request_id, url, response.status_code)
+        if response.status_code < 500:
+            report_provider_success(provider_id)
+        else:
+            report_provider_failure(
+                provider_id,
+                error=f"upstream_http_{response.status_code}",
+                status_code=response.status_code,
+            )
         return response.status_code, _decode_json_or_text(response.content)
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("forward_json http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
+        report_provider_failure(provider_id, error=detail, status_code=0)
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
@@ -237,18 +281,29 @@ async def _forward_stream_lines(
 ) -> AsyncGenerator[bytes, None]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     trace_request_id = _trace_request_id(headers)
+    provider_id = _active_provider_id.get()
     logger.debug("forward_stream start request_id=%s url=%s payload_bytes=%d", trace_request_id, url, len(body))
     client = await _get_upstream_async_client()
+    _stream_success = False
     try:
         async with client.stream("POST", url=url, content=body, headers=dict(headers)) as resp:
             logger.debug("forward_stream connected request_id=%s url=%s status=%s", trace_request_id, url, resp.status_code)
             if resp.status_code >= 400:
                 detail = _safe_error_detail(_decode_json_or_text(await resp.aread()))
+                report_provider_failure(
+                    provider_id,
+                    error=f"upstream_http_{resp.status_code}:{detail[:120]}",
+                    status_code=resp.status_code,
+                )
                 raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
             async for chunk in resp.aiter_bytes():
                 if chunk:
+                    _stream_success = True
                     yield chunk
+        if _stream_success:
+            report_provider_success(provider_id)
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("forward_stream http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
+        report_provider_failure(provider_id, error=detail, status_code=0)
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc

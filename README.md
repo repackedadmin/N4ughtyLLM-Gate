@@ -1,7 +1,6 @@
-# N4ughtyLLM Gate - © 2026 Repacked Tools (PTY). All rights reserved.
+# N4ughtyLLM Gate
 
 *Last updated: March 24, 2026.*
-
 
 **Open-source security gateway for LLM API calls** — sits between your AI agents/apps and upstream LLM providers, enforcing security policies on both request and response sides.
 
@@ -15,6 +14,7 @@ N4ughtyLLM Gate is a self-hosted, pipeline-based security proxy designed to prot
 - **PII / Secret Redaction** — 50+ pattern categories covering API keys, tokens, credit cards, SSNs, crypto wallet addresses/seed phrases, medical records, and infrastructure identifiers
 - **Dangerous Response Sanitization** — Automatic obfuscation of high-risk LLM outputs (shell commands, SQL injection payloads, HTTP smuggling) with configurable security levels (low/medium/high)
 - **OpenAI-Compatible API** — Drop-in replacement for `/v1/chat/completions`, `/v1/responses`, and generic proxy; works with any OpenAI-compatible provider
+- **Native Upstream Engine** — Built-in provider registry with encrypted credentials, model-group routing policies (weighted/failover), live circuit breaker, and health checks — no external proxy wrappers required
 - **MCP & Agent SKILL Support** — Integrates with Cursor, Claude Code, Codex, Windsurf and other AI coding agents via Model Context Protocol
 - **Token-Based Routing** — Route requests to multiple upstream providers through a single gateway with per-token upstream mapping and whitelist controls
 - **Web Management Console** — Built-in admin UI for configuration, token management, security rules CRUD, key rotation, and real-time request statistics
@@ -27,6 +27,7 @@ N4ughtyLLM Gate is a self-hosted, pipeline-based security proxy designed to prot
 - **Centralize security policy** instead of implementing protections in every AI application
 - **Audit LLM interactions** with structured logging, risk scoring, and dangerous content tracking
 - **Secure MCP tool calls** — guard against malicious tool invocations and privilege escalation
+- **Multi-provider routing** — automatically route by model name across weighted or failover provider pools, with automatic circuit tripping on failures
 
 ### How It Compares
 
@@ -36,9 +37,9 @@ N4ughtyLLM Gate is a self-hosted, pipeline-based security proxy designed to prot
 | Request + Response filtering | Both sides | Both sides | Request only | Request only |
 | OpenAI-compatible drop-in | Yes | No | No | No |
 | Built-in PII redaction | 50+ patterns | Yes | No | No |
+| Native multi-provider routing | Yes (weighted/failover + circuit breaker) | N/A | N/A | N/A |
 | Web management UI | Yes | No | No | Dashboard |
 | MCP / Agent SKILL support | Yes | No | No | No |
-| Token-based multi-upstream routing | Yes | N/A | N/A | N/A |
 | No external API dependency | Yes (TF-IDF local) | Yes | No (OpenAI) | No |
 | Bilingual (EN/ZH) | Yes | English | English | English |
 
@@ -55,7 +56,7 @@ flowchart LR
 
     subgraph N4LMGate["N4ughtyLLM Gate Security Gateway"]
         direction TB
-        MW[Token Router & Middleware]
+        MW[Token & Provider Router]
 
         subgraph ReqPipeline["Request Pipeline"]
             R1[PII Redaction<br/>50+ patterns]
@@ -73,7 +74,14 @@ flowchart LR
             S6[Output Sanitizer<br/>block / sanitize / pass]
         end
 
+        subgraph UpstreamEngine["Native Upstream Engine"]
+            UE1[Provider Registry<br/>encrypted credentials]
+            UE2[Model-Group Policies<br/>weighted / failover]
+            UE3[Circuit Breaker<br/>live traffic feedback]
+        end
+
         MW --> ReqPipeline
+        MW --> UpstreamEngine
     end
 
     subgraph Upstream["Upstream LLM Providers"]
@@ -83,7 +91,8 @@ flowchart LR
     end
 
     A1 & A2 -->|"baseUrl → gateway"| MW
-    ReqPipeline -->|filtered request| U1 & U2 & U3
+    ReqPipeline -->|filtered request| UpstreamEngine
+    UpstreamEngine -->|routed request| U1 & U2 & U3
     U1 & U2 & U3 -->|raw response| RespPipeline
     RespPipeline -->|sanitized response| A1 & A2
 ```
@@ -114,23 +123,24 @@ No. The built-in TF-IDF semantic classifier runs locally (~166KB model file) wit
 **How do I deploy N4ughtyLLM Gate?**
 The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
 
+**Do I need CLIProxyAPI, Sub2API, or AIClient-2-API?**
+No. Those external wrapper projects are no longer required. N4ughtyLLM Gate includes a native upstream engine: register providers directly via `POST /__gw__/providers`, configure routing policies and circuit breakers, and route traffic without any third-party proxy shim.
+
 
 ## Getting Started
 
-### Legacy technical identifiers (stability)
+### Technical identifiers (stability)
 
-The product name is **N4ughtyLLM Gate**. For backward compatibility with existing installs, tooling, and configs, the implementation still uses:
+The product name is **N4ughtyLLM Gate**. For backward compatibility with existing installs, tooling, and configs, the implementation uses:
 
 - **Python package / import path** — `n4ughtyllm_gate` (e.g. `pip install -e .`, `uvicorn …` below)
 - **Environment variables** — every tunable is prefixed with **`N4UGHTYLLM_GATE_`** (see Configuration)
 - **Optional HTTP headers** — gateway-specific headers use the **`x-n4ughtyllm-gate-*`** pattern (e.g. request correlation, HMAC, redaction hints)
-- **Docker Compose service name** — often `n4ughtyllm_gate` in sample stacks
+- **Docker Compose service name** — `n4ughtyllm_gate` in sample stacks
 
 These names are intentional and stable; they are not the public product name.
 
 ### Docker Compose (Recommended)
-
-The upstream Git repository is still hosted at **`ax128/N4ughtyLLM-Gate`** on GitHub; clone it into any directory you like (example below uses `n4ughtyllm-gate`).
 
 ```bash
 git clone https://github.com/ax128/N4ughtyLLM-Gate.git n4ughtyllm-gate
@@ -150,58 +160,144 @@ pip install -e ".[dev,semantic]"
 uvicorn n4ughtyllm_gate.core.gateway:app --host 127.0.0.1 --port 18080
 ```
 
+---
+
 ## Upstream Integration
 
-N4ughtyLLM Gate is a standalone security proxy layer — it does **not** manage upstream services. Upstreams run independently per their own documentation; client requests pass through the gateway.
+N4ughtyLLM Gate includes a **native upstream engine**: a built-in provider registry with encrypted credentials, model-group routing policies, a live circuit breaker, and health checks. No external proxy wrappers are required.
 
-### Verified Upstreams
+### Provider Management
 
-| Upstream | Description | Default Port |
-|----------|-------------|-------------|
-| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | OAuth multi-account LLM proxy (Claude/Gemini/OpenAI) | 8317 |
-| [Sub2API](https://github.com/repackedadmin/sub2api) | AI API subscription platform (Claude/Gemini/Antigravity) | 8080 |
-| [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) | Multi-source AI client proxy (Gemini CLI/Codex/Kiro/Grok) | 3000 |
-| Any OpenAI-compatible API | — | — |
+Register and manage upstream providers via admin API. Credentials are stored encrypted at rest. Provider auth injection supports `bearer`, `x-api-key`, or `none`.
 
-### Scenario 1: Co-located Deployment (gateway and upstream on same server)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/__gw__/providers` | Create or update a provider |
+| `GET` | `/__gw__/providers` | List all providers |
+| `GET` | `/__gw__/providers/{provider_id}` | Fetch one provider |
+| `DELETE` | `/__gw__/providers/{provider_id}` | Delete a provider |
+| `GET` | `/__gw__/providers/{provider_id}/health` | Live health probe |
 
-The gateway supports **automatic local port routing** (on by default in Docker; for bare metal, enable it in `config/.env` — see `.env.example`):
-
-```
-Client → http://<gateway-ip>:18080/v1/__gw__/t/{port}/... → localhost:{port}/v1/...
-```
-
-| Upstream | Client Base URL |
-|----------|----------------|
-| CLIProxyAPI | `http://<gateway-ip>:18080/v1/__gw__/t/8317` |
-| Sub2API | `http://<gateway-ip>:18080/v1/__gw__/t/8080` |
-| AIClient-2-API | `http://<gateway-ip>:18080/v1/__gw__/t/3000` |
-
-- `Authorization: Bearer <key>` is passed through to upstream transparently
-- Multiple upstreams can be used simultaneously
-- **No token registration, no config editing, no gateway restart required**
-- Supports filter mode suffixes: `token__redact` (redaction only) or `token__passthrough` (full passthrough)
-  - `token__passthrough` still keeps the OpenAI compatibility layer: gateway-only fields are stripped before forwarding, and Chat/Responses parameter compatibility is preserved
-
-### Scenario 2: Remote Upstream
-
-For remote upstreams, register a token binding via API:
+Example registration:
 
 ```bash
-curl -X POST http://127.0.0.1:18080/__gw__/register \
+curl -X POST http://127.0.0.1:18080/__gw__/providers \
   -H "Content-Type: application/json" \
-  -d '{"upstream_base":"https://remote-upstream.example.com/v1","gateway_key":"<YOUR_GATEWAY_KEY>"}'
+  -d '{
+    "gateway_key": "<YOUR_GATEWAY_KEY>",
+    "provider_id": "openai-main",
+    "display_name": "OpenAI Main",
+    "upstream_base": "https://api.openai.com/v1",
+    "api_key": "sk-...",
+    "auth_mode": "bearer"
+  }'
 ```
 
-Use the returned token: `http://<gateway-ip>:18080/v1/__gw__/t/<token>`
+### Model-Group Routing Policies
 
-### Scenario 3: Caddy + TLS for Public Access
+Routing policies distribute traffic across providers by model name pattern, using **weighted** (percentage split) or **failover** (priority-ordered) strategies.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/__gw__/routing-policies` | Create or update a policy |
+| `GET` | `/__gw__/routing-policies` | List all policies |
+| `GET` | `/__gw__/routing-policies/{group_id}` | Fetch one policy |
+| `DELETE` | `/__gw__/routing-policies/{group_id}` | Delete a policy |
+| `GET` | `/__gw__/routing/resolve?model=...` | Preview which provider would be selected |
+
+Supported strategies:
+- `failover` — pick the highest-priority healthy provider that matches the model name
+- `weighted` — distribute requests across healthy providers by configured weight ratios
+
+Example policy (80/20 weighted split across two providers for all GPT-5 models):
+
+```bash
+curl -X POST http://127.0.0.1:18080/__gw__/routing-policies \
+  -H "Content-Type: application/json" \
+  -d '{
+    "gateway_key": "<YOUR_GATEWAY_KEY>",
+    "group_id": "gpt5-main",
+    "model_patterns": ["gpt-5*", "o*"],
+    "strategy": "weighted",
+    "providers": [
+      {"provider_id": "openai-main",   "weight": 8, "priority": 100},
+      {"provider_id": "openai-backup", "weight": 2, "priority": 100}
+    ]
+  }'
+```
+
+Configuration file: `config/upstream_routing.json` (template: `config/upstream_routing.json.example`).
+
+### Circuit Breaker
+
+The circuit breaker automatically tracks live upstream failures per provider and removes unhealthy providers from routing pools without manual intervention.
+
+**How it works:**
+1. Every failed upstream HTTP call (5xx or connection error) increments the provider's consecutive failure counter.
+2. Once the failure count reaches `circuit_breaker_failure_threshold` (default: 3), the circuit **trips open** and the provider is excluded from model-group routing.
+3. The open window uses exponential backoff starting at `circuit_breaker_base_open_seconds` (default: 10s), capped at `circuit_breaker_max_open_seconds` (default: 300s).
+4. After the window expires the circuit enters **half-open** and allows a probe request through. A successful probe closes the circuit; a failed probe re-trips it.
+5. Explicit health-check calls (`GET /__gw__/providers/{id}/health`) also update the circuit state.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/__gw__/circuit` | List all provider circuit states |
+| `GET` | `/__gw__/circuit/{provider_id}` | Single provider circuit state |
+| `POST` | `/__gw__/circuit/{provider_id}/reset` | Force-close (admin override) |
+
+Circuit breaker settings (all configurable via `config/.env`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_ENABLED` | `true` | Enable/disable circuit breaker |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before trip |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_BASE_OPEN_SECONDS` | `10.0` | Minimum open window (exponential backoff base) |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_MAX_OPEN_SECONDS` | `300.0` | Maximum open window cap |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | `2` | Probe successes needed to close |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_JITTER_FACTOR` | `0.1` | Jitter (0–1) on open window to spread recovery |
+
+### Routing Scenarios
+
+#### Scenario 1: Provider-bound URL route
+
+Bind requests directly to a provider id in the URL — no token registration needed:
 
 ```
-Client → https://api.example.com/v1/__gw__/t/8317/... → Caddy → N4ughtyLLM Gate:18080 → localhost:8317
+Client → /v1/__gw__/p/{provider_id}/chat/completions → upstream for that provider
 ```
 
-See [Caddyfile.example](Caddyfile.example) for the complete configuration.
+Supports filter mode suffixes: `provider__redact` (redaction only) and `provider__passthrough` (full passthrough). Works for both `/v1` and `/v2` routes.
+
+#### Scenario 2: Header-driven provider routing
+
+Bind by header without URL rewriting:
+
+```bash
+curl -X POST http://127.0.0.1:18080/v1/responses \
+  -H "x-n4ughtyllm-gate-provider: openai-main" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","input":"hello"}'
+```
+
+Optional model hint header: `x-n4ughtyllm-gate-model`.
+
+#### Scenario 3: Automatic model-group policy routing
+
+For direct `/v1/*` requests with no token path and no provider header, the gateway auto-selects a provider by model group policy. This is the fully automatic path — define policies once, send requests normally.
+
+#### Scenario 4: Default upstream (single-provider fast path)
+
+Set `N4UGHTYLLM_GATE_UPSTREAM_BASE_URL` and call `/v1/...` directly without any routing configuration.
+
+#### Scenario 5: Legacy token routes (still supported)
+
+Token-based routes remain available for backward compatibility:
+- `POST /__gw__/register`, `POST /__gw__/add`, `POST /__gw__/remove`, `POST /__gw__/lookup`, `POST /__gw__/unregister`
+- Route format: `/v1/__gw__/t/{token}/...` and `/v2/__gw__/t/{token}/...`
+
+See [Caddyfile.example](Caddyfile.example) for public TLS deployment.
+
+---
 
 ## Core Capabilities
 
@@ -209,12 +305,13 @@ See [Caddyfile.example](Caddyfile.example) for the complete configuration.
 
 - **OpenAI-compatible** (full security pipeline): `POST /v1/chat/completions`, `POST /v1/responses`
 - **v2 Generic HTTP Proxy**: `ANY /v2/__gw__/t/<token>/...` (requires `x-target-url` header)
-- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path (including `/v1/messages`) to upstream **without** running the security filter pipeline; use this for non-OpenAI providers that need transparent proxying
+- **Provider route binding**: `ANY /v1/__gw__/p/<provider_id>/...` and `ANY /v2/__gw__/p/<provider_id>/...`
+- **Generic pass-through**: `POST /v1/{subpath}` — forwards any other `/v1/` path to upstream without running the security filter pipeline; use for non-OpenAI providers that need transparent proxying
 
 Compatibility notes:
 
-- If a client accidentally sends a Responses-style payload (`input`) to `/v1/chat/completions`, N4ughtyLLM Gate forwards it upstream as `/v1/responses` but converts the result back to Chat Completions JSON/SSE for the client.
-- If a client accidentally sends a Chat-style payload (`messages`) to `/v1/responses`, N4ughtyLLM Gate applies the inverse compatibility mapping and returns Responses-shaped output.
+- If a client sends a Responses-style payload (`input`) to `/v1/chat/completions`, N4ughtyLLM Gate forwards it upstream as `/v1/responses` but converts the result back to Chat Completions JSON/SSE for the client.
+- If a client sends a Chat-style payload (`messages`) to `/v1/responses`, N4ughtyLLM Gate applies the inverse compatibility mapping and returns Responses-shaped output.
 
 ### Security Pipeline
 
@@ -240,15 +337,17 @@ Compatibility notes:
 - **Crypto**: BTC/ETH/SOL/TRON addresses, WIF/xprv/xpub, seed phrases, exchange API keys
 - **Infrastructure** (relaxed mode): hostnames, OS versions, container IDs, K8s resources, internal URLs
 
+---
+
 ## Configuration
 
-Set values in `config/.env`. Every variable name uses the **`N4UGHTYLLM_GATE_`** prefix (legacy, required).
+Set values in `config/.env`. Every variable name uses the **`N4UGHTYLLM_GATE_`** prefix.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `N4UGHTYLLM_GATE_HOST` | `127.0.0.1` | Listen address |
 | `N4UGHTYLLM_GATE_PORT` | `18080` | Listen port |
-| `N4UGHTYLLM_GATE_UPSTREAM_BASE_URL` | _(empty)_ | Direct upstream URL (no token needed) |
+| `N4UGHTYLLM_GATE_UPSTREAM_BASE_URL` | _(empty)_ | Default upstream URL (no token or provider needed) |
 | `N4UGHTYLLM_GATE_SECURITY_LEVEL` | `medium` | Security strictness: `low` / `medium` / `high` |
 | `N4UGHTYLLM_GATE_RISK_SCORE_THRESHOLD` | `0.7` | Risk score threshold (0–1); lower = stricter. Overridden per-policy by `risk_threshold` in policy YAML (default policy uses `0.85`) |
 | `N4UGHTYLLM_GATE_STORAGE_BACKEND` | `sqlite` | Storage: `sqlite` / `redis` / `postgres` |
@@ -263,12 +362,22 @@ Set values in `config/.env`. Every variable name uses the **`N4UGHTYLLM_GATE_`**
 | `N4UGHTYLLM_GATE_UPSTREAM_TIMEOUT_SECONDS` | `600` | Upstream request timeout in seconds |
 | `N4UGHTYLLM_GATE_ENABLE_REQUEST_HMAC_AUTH` | `false` | Enable HMAC signature verification for requests |
 | `N4UGHTYLLM_GATE_TRUSTED_PROXY_IPS` | _(empty)_ | Comma-separated trusted reverse-proxy IPs/CIDRs for X-Forwarded-For |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_ENABLED` | `true` | Enable runtime circuit breaker for upstream providers |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `3` | Consecutive failures before circuit trips |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_BASE_OPEN_SECONDS` | `10.0` | Minimum circuit open window (seconds) |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_MAX_OPEN_SECONDS` | `300.0` | Maximum circuit open window cap |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | `2` | Probe successes to close circuit in half-open state |
+| `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_JITTER_FACTOR` | `0.1` | Jitter factor (0–1) applied to open window |
 
-Full reference: [`config/.env.example`](config/.env.example) and the typed [settings module](n4ughtyllm_gate/config/settings.py) in the source tree.
+Full reference: [`config/.env.example`](config/.env.example) and [`config/README.md`](config/README.md).
+
+---
 
 ## Agent Skill
 
 Agent-executable installation and integration guide: [SKILL.md](SKILL.md)
+
+---
 
 ## Development
 
@@ -283,9 +392,9 @@ Optional observability support:
 pip install -e ".[observability]"
 ```
 
-With the observability extra installed, N4ughtyLLM Gate exposes `/metrics` for Prometheus scraping and initializes the OpenTelemetry provider/exporter during startup.
-Automatic request spans are not enabled by default in this release.
-`/metrics` does not have a dedicated auth layer; it inherits the gateway's normal network and auth controls, so disabling loopback/HMAC protections may expose it more broadly.
+With the observability extra installed, N4ughtyLLM Gate exposes `/metrics` for Prometheus scraping and initializes the OpenTelemetry provider/exporter during startup. `/metrics` does not have a dedicated auth layer; it inherits the gateway's normal network and auth controls.
+
+---
 
 ## Troubleshooting
 
@@ -298,24 +407,20 @@ The token is missing from the map, was removed, or the token map file in `config
 ### Upstream returns 4xx/5xx
 Gateway transparently forwards upstream errors. Verify upstream availability independently first.
 
+### Provider circuit is open / requests routed to wrong provider
+Check circuit state: `GET /__gw__/circuit`. If a provider was tripped by transient failures, reset it manually: `POST /__gw__/circuit/{provider_id}/reset`. Adjust `N4UGHTYLLM_GATE_CIRCUIT_BREAKER_FAILURE_THRESHOLD` to be more or less sensitive.
+
 ### Streaming logs show `upstream_eof_no_done` or `terminal_event_no_done_recovered:*`
 Two different cases are logged separately:
 
 - `upstream_eof_no_done`: upstream closed the stream without sending `data: [DONE]`; the gateway auto-recovers by synthesizing a completion event.
-- `terminal_event_no_done_recovered:response.completed|response.failed|error`: the gateway already received an explicit terminal event from upstream, but upstream closed before sending `[DONE]`. This is no longer logged as a generic EOF recovery.
-
-For `/v1/responses`, forwarded upstream calls include a **request correlation header** (implementation name: `x-n4ughtyllm-gate-request-id`), and upstream forwarding logs use the same `request_id`. If gateway logs show repeated `incoming request` entries but only one or two `forward_stream start/connected` entries for matching request IDs, the extra traffic is coming into the gateway as new HTTP requests rather than SSE chunks being split into multiple upstream calls.
-
-Optimization note (2026-03): Responses SSE frames that include explicit `event:` headers are now buffered and forwarded as full event frames instead of line-by-line. This prevents `event:` and `data:` lines from being reordered across `response.output_text.delta`, `response.output_text.done`, and `response.completed`.
+- `terminal_event_no_done_recovered:response.completed|response.failed|error`: the gateway already received an explicit terminal event from upstream, but upstream closed before sending `[DONE]`.
 
 ### v2 returns `missing_target_url_header`
 The `x-target-url` header is required for v2 proxy requests. Include the full target URL with query string.
 
+---
+
 ## License
 
 [MIT](LICENSE)
-
-© 2026 Repacked Tools (PTY). All rights reserved.
-
-
-

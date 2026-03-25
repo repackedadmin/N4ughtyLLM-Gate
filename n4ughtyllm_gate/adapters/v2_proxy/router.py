@@ -21,6 +21,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from n4ughtyllm_gate.config.security_rules import load_security_rules
 from n4ughtyllm_gate.config.redact_values import replace_exact_values
 from n4ughtyllm_gate.config.settings import settings
+from n4ughtyllm_gate.core.upstream_registry import (
+    report_provider_failure,
+    report_provider_success,
+)
 from n4ughtyllm_gate.util.base64_detect import looks_like_base64_blob
 from n4ughtyllm_gate.util.logger import logger
 from n4ughtyllm_gate.util.masking import mask_for_log
@@ -795,6 +799,7 @@ async def _proxy_v2_streaming(
     forward_headers: dict[str, str],
     outbound_body: bytes,
     redaction_count: int,
+    provider_id: str = "",
 ) -> Response:
     exit_stack = AsyncExitStack()
     try:
@@ -810,6 +815,7 @@ async def _proxy_v2_streaming(
         await exit_stack.aclose()
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("v2 upstream unreachable target=%s error=%s", target_url, detail)
+        report_provider_failure(provider_id, error=detail, status_code=0)
         return JSONResponse(
             status_code=502,
             content={
@@ -825,6 +831,17 @@ async def _proxy_v2_streaming(
     if redaction_count > 0:
         response_headers["x-n4ughtyllm-gate-v2-request-redacted"] = "true"
         response_headers["x-n4ughtyllm-gate-v2-redaction-count"] = str(redaction_count)
+
+    # Circuit breaker: a 5xx from the upstream is a provider failure.
+    # 4xx are client errors (our request was invalid); the provider is responding correctly.
+    # Report the failure now so routing can exclude this provider before any streaming begins.
+    _circuit_reported_failure = upstream_response.status_code >= 500
+    if _circuit_reported_failure:
+        report_provider_failure(
+            provider_id,
+            error=f"upstream_http_{upstream_response.status_code}",
+            status_code=upstream_response.status_code,
+        )
 
     response_content_type = upstream_response.headers.get("content-type", "")
     is_textual = _looks_textual_content_type(response_content_type)
@@ -907,6 +924,7 @@ async def _proxy_v2_streaming(
         saw_done = False
         sse_tail = ""
         inject_done = False
+        _stream_failed = False
         try:
             for chunk in buffered_chunks:
                 if not chunk:
@@ -940,10 +958,16 @@ async def _proxy_v2_streaming(
             logger.warning(
                 "v2 upstream stream interrupted target=%s error=%s", target_url, detail
             )
+            _stream_failed = True
+            report_provider_failure(provider_id, error=detail, status_code=0)
         finally:
             if is_sse and not saw_done:
                 inject_done = True
             await exit_stack.aclose()
+        # If the upstream returned a good status and the stream drained without error,
+        # count this as a provider success so the circuit can recover.
+        if not _circuit_reported_failure and not _stream_failed:
+            report_provider_success(provider_id)
         if inject_done:
             logger.warning(
                 "v2 sse upstream closed without DONE method=%s path=%s target=%s inject_done=true",
@@ -1073,6 +1097,11 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 redaction_markers,
             )
 
+    # Propagate the provider identity injected by the security boundary middleware.
+    # The field is set when routing via a provider-bound path (/__gw__/p/{id}/...).
+    # Falls back to empty string for raw x-target-url requests without a bound provider.
+    provider_id: str = (request.scope.get("n4ughtyllm_gate_provider_id") or "").strip()
+
     forward_headers = _build_forward_headers(request)
     client = await _get_v2_async_client()
     if _request_prefers_streaming(request, outbound_body, original_content_type):
@@ -1083,6 +1112,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
             forward_headers=forward_headers,
             outbound_body=outbound_body,
             redaction_count=redaction_count,
+            provider_id=provider_id,
         )
 
     try:
@@ -1095,6 +1125,7 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("v2 upstream unreachable target=%s error=%s", target_url, detail)
+        report_provider_failure(provider_id, error=detail, status_code=0)
         return JSONResponse(
             status_code=502,
             content={
@@ -1105,6 +1136,17 @@ async def proxy_v2(request: Request, proxy_path: str = "") -> Response:
                 }
             },
         )
+
+    # Circuit breaker feedback for the non-streaming path.
+    # 5xx = provider failure; anything else (including 4xx client errors) = provider healthy.
+    if upstream_response.status_code >= 500:
+        report_provider_failure(
+            provider_id,
+            error=f"upstream_http_{upstream_response.status_code}",
+            status_code=upstream_response.status_code,
+        )
+    else:
+        report_provider_success(provider_id)
 
     response_headers = _build_client_response_headers(upstream_response.headers)
     response_body = upstream_response.content

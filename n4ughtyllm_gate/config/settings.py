@@ -149,5 +149,20 @@ class Settings(BaseSettings):
     # Admin endpoint rate limit: max requests per minute per client IP
     admin_rate_limit_per_minute: int = 30
 
+    # Circuit breaker: automatically trips when a provider accumulates failures during live traffic.
+    # The circuit stays open for an exponentially increasing back-off window, then half-opens for a probe.
+    # Applies to both model-group failover routing and explicit provider routing.
+    circuit_breaker_enabled: bool = True
+    # Consecutive failures required before the circuit trips.
+    circuit_breaker_failure_threshold: int = 3
+    # Minimum time (seconds) a tripped circuit stays open before allowing a probe request.
+    circuit_breaker_base_open_seconds: float = 10.0
+    # Hard cap on the exponential back-off window (seconds).
+    circuit_breaker_max_open_seconds: float = 300.0
+    # Half-open state: number of consecutive successes required to fully close the circuit.
+    circuit_breaker_success_threshold: int = 2
+    # Jitter factor (0.0–1.0) applied to the open window to avoid thundering herd on recovery.
+    circuit_breaker_jitter_factor: float = 0.1
+
 
 settings = Settings()

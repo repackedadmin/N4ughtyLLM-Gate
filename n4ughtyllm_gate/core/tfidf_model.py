@@ -30,6 +30,7 @@ class TfidfClassifier:
     def __init__(self) -> None:
         self._vectorizer: Any = _UNAVAILABLE
         self._classifier: Any = _UNAVAILABLE
+        self._injection_class_idx: int = 0
         self._jieba_loaded = False
         self._load()
 
@@ -42,9 +43,20 @@ class TfidfClassifier:
 
             self._vectorizer = joblib.load(_VECTORIZER_PATH)
             self._classifier = joblib.load(_CLASSIFIER_PATH)
+            # Resolve the index of the "injection" class at load time so predict()
+            # is robust regardless of the class ordering used during training.
+            classes = list(self._classifier.classes_)
+            if "injection" not in classes:
+                raise ValueError(f"Classifier must have an 'injection' class; got {classes}")
+            self._injection_class_idx = classes.index("injection")
             # Pre-warm jieba dictionary so first predict() doesn't pay loading cost
             self._ensure_jieba()
-            logger.info("tfidf model loaded vectorizer=%s classifier=%s", _VECTORIZER_PATH, _CLASSIFIER_PATH)
+            logger.info(
+                "tfidf model loaded vectorizer=%s classifier=%s classes=%s",
+                _VECTORIZER_PATH,
+                _CLASSIFIER_PATH,
+                classes,
+            )
         except Exception as exc:
             logger.warning("tfidf model load failed: %s", exc)
             self._vectorizer = _UNAVAILABLE
@@ -101,8 +113,7 @@ class TfidfClassifier:
             tokenized = self._tokenize(text)
             vec = self._vectorizer.transform([tokenized])
             proba = self._classifier.predict_proba(vec)[0]
-            # proba[0] = safe, proba[1] = injection
-            injection_prob = float(proba[1])
+            injection_prob = float(proba[self._injection_class_idx])
             if injection_prob >= 0.5:
                 return "injection", injection_prob
             return "safe", 1.0 - injection_prob
