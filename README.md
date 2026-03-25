@@ -129,6 +129,36 @@ No. Those external wrapper projects are no longer required. N4ughtyLLM Gate incl
 
 ## Getting Started
 
+### Before You Run
+
+1. **Copy the example config** and fill in your upstream URL and key:
+
+   ```bash
+   cp config/.env.example config/.env
+   ```
+
+   At minimum set `N4UGHTYLLM_GATE_UPSTREAM_BASE_URL` and `N4UGHTYLLM_GATE_GATEWAY_KEY` in `config/.env`.
+
+2. **Install with dev extras:**
+
+   ```bash
+   pip install -e ".[dev,semantic]"
+   ```
+
+   Add optional extras as needed: `[redis]`, `[postgres]`, `[observability]`.
+
+3. **Run the gateway** — choose one:
+
+   ```bash
+   # Native (hot-reload, recommended for development)
+   uvicorn n4ughtyllm_gate.core.gateway:app --host 127.0.0.1 --port 18080 --reload
+
+   # Docker (production-style, no local Python install required)
+   docker compose up -d --build
+   ```
+
+---
+
 ### Technical identifiers (stability)
 
 The product name is **N4ughtyLLM Gate**. For backward compatibility with existing installs, tooling, and configs, the implementation uses:

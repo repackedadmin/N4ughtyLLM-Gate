@@ -6,6 +6,9 @@ so the gateway works without the ``observability`` extras.
 
 from __future__ import annotations
 
+import threading
+from typing import Any
+
 from n4ughtyllm_gate.util.logger import logger
 
 try:
@@ -14,6 +17,11 @@ try:
     _HAS_PROMETHEUS = True
 except ImportError:
     _HAS_PROMETHEUS = False
+
+# Thread-safe cache of dynamically-registered Prometheus counters for
+# emit_counter().  Keys are metric names; values are Counter instances.
+_dynamic_counters: dict[str, Any] = {}
+_dynamic_counters_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Counters
@@ -127,8 +135,59 @@ def set_pending_confirmations(count: int) -> None:
 
 # Legacy interface preserved for backward compatibility.
 def emit_counter(name: str, value: int = 1, labels: dict | None = None) -> None:
-    """Generic counter emit — prefer typed helpers above."""
-    logger.info("metric counter name=%s value=%s labels=%s", name, value, labels or {})
+    """Emit a named counter increment.
+
+    When ``prometheus-client`` is installed, the counter is registered on first
+    use under the name ``n4ughtyllm_gate_<name>_total`` and incremented by
+    *value*.  Label names are derived from the keys of *labels*.  Callers must
+    pass the same label set on every call for a given *name*; mixing different
+    label sets for the same metric name raises a ``ValueError`` from
+    ``prometheus-client``.
+
+    When Prometheus is unavailable the call is a structured debug log only.
+    """
+    resolved_labels = labels or {}
+    if _HAS_PROMETHEUS:
+        safe_name = name.replace("-", "_").replace(".", "_")
+        metric_name = f"n4ughtyllm_gate_{safe_name}_total"
+        label_names = sorted(resolved_labels.keys())
+        with _dynamic_counters_lock:
+            counter = _dynamic_counters.get(metric_name)
+            if counter is None:
+                try:
+                    counter = Counter(
+                        metric_name,
+                        f"Dynamic counter: {name}",
+                        label_names,
+                    )
+                    _dynamic_counters[metric_name] = counter
+                except Exception as exc:
+                    # Counter may already be registered with a different label
+                    # set (programming error); fall back to log so we don't
+                    # crash the request path.
+                    logger.warning(
+                        "emit_counter registration failed name=%s error=%s",
+                        metric_name,
+                        exc,
+                    )
+                    logger.debug(
+                        "metric counter name=%s value=%s labels=%s",
+                        name,
+                        value,
+                        resolved_labels,
+                    )
+                    return
+        try:
+            if label_names:
+                counter.labels(**{k: str(resolved_labels[k]) for k in label_names}).inc(value)
+            else:
+                counter.inc(value)
+        except Exception as exc:
+            logger.warning("emit_counter increment failed name=%s error=%s", metric_name, exc)
+    else:
+        logger.debug(
+            "metric counter name=%s value=%s labels=%s", name, value, resolved_labels
+        )
 
 
 def get_metrics_app():

@@ -12,6 +12,7 @@ from functools import lru_cache
 from typing import Any, AsyncGenerator, Generator, Mapping
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from n4ughtyllm_gate.observability.metrics import inc_confirmation, set_pending_confirmations
 
 from n4ughtyllm_gate.adapters.openai_compat.mapper import (
     to_chat_response,
@@ -2387,6 +2388,7 @@ def _load_single_pending_for_session(
         return None
     if int(record.get("expires_at", 0)) <= int(now_ts):
         store.update_pending_confirmation_status(confirm_id=str(record.get("confirm_id", "")), status="expired", now_ts=now_ts)
+        inc_confirmation("expired")
         return None
     return record
 
@@ -2428,6 +2430,7 @@ def _resolve_pending_confirmation(
         return None
     if int(record.get("expires_at", 0)) <= int(now_ts):
         store.update_pending_confirmation_status(confirm_id=confirm_id, status="expired", now_ts=now_ts)
+        inc_confirmation("expired")
         return None
     merged = dict(record)
     merged["_n4ughtyllm_gate_bind_action_token"] = bind_action_token
@@ -4794,6 +4797,7 @@ async def chat_completions(payload: dict, request: Request):
                 summary=summary_text,
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            inc_confirmation("canceled")
             logger.info(
                 "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,
@@ -5039,6 +5043,7 @@ async def responses(payload: dict, request: Request):
                 summary=summary_text,
             )
             _write_audit_event(ctx_preview, boundary=boundary)
+            inc_confirmation("canceled")
             logger.info(
                 "confirmation canceled request_id=%s session_id=%s tenant_id=%s confirm_id=%s",
                 req_preview.request_id,

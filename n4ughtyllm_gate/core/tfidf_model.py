@@ -9,12 +9,9 @@ from __future__ import annotations
 import re
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from n4ughtyllm_gate.util.logger import logger
-
-if TYPE_CHECKING:
-    pass
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "tfidf"
 _VECTORIZER_PATH = _MODEL_DIR / "vectorizer.joblib"

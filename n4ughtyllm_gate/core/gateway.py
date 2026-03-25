@@ -33,6 +33,7 @@ from n4ughtyllm_gate.adapters.openai_compat.router import (
     reload_runtime_dependencies,
     router as openai_router,
 )
+from n4ughtyllm_gate.adapters.openai_compat.pipeline_runtime import count_pending_confirmations
 from n4ughtyllm_gate.adapters.openai_compat.offload import shutdown_payload_transform_executor
 from n4ughtyllm_gate.adapters.openai_compat.upstream import close_upstream_async_client
 from n4ughtyllm_gate.adapters.relay_compat.router import router as relay_router
@@ -351,7 +352,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     global _confirmation_cache_task, _hot_reloader
     if settings.enable_pending_prune_task and _confirmation_cache_task is None:
         _confirmation_cache_task = ConfirmationCacheTask(
-            prune_func=prune_pending_confirmations
+            prune_func=prune_pending_confirmations,
+            count_func=count_pending_confirmations,
         )
         await _confirmation_cache_task.start()
 
@@ -663,7 +665,7 @@ async def security_boundary_middleware(request: Request, call_next):
             )
             return finish(response)
 
-        if request.url.path.startswith("/__ui__"):
+        if _is_passthrough_read_path(request.url.path):
             client_ip = _real_client_ip(request)
             ui_allowed = (
                 _is_internal_ip(client_ip)
@@ -872,8 +874,13 @@ async def security_boundary_middleware(request: Request, call_next):
                         routing_meta.get("strategy"),
                         request.url.path,
                     )
-                except KeyError:
-                    pass
+                except KeyError as _routing_exc:
+                    logger.debug(
+                        "policy routing no provider available model=%s reason=%s path=%s",
+                        model_hint or "(empty)",
+                        str(_routing_exc),
+                        request.url.path,
+                    )
             if not bool(request.scope.get("n4ughtyllm_gate_token_authenticated")):
                 client_ip = _real_client_ip(request)
                 logger.warning(

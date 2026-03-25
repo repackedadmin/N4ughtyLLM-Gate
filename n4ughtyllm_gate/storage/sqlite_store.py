@@ -467,6 +467,21 @@ class SqliteKVStore(KVStore):
                 return int(cursor.rowcount or 0)
         return self._with_retry(_delete)
 
+    def count_pending_confirmations(self, *, tenant_id: str = "default") -> int:
+        """Return the number of active (pending or executing) confirmation records."""
+        def _count() -> int:
+            with self._managed_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) FROM pending_confirmation
+                    WHERE status IN ('pending', 'executing')
+                    AND (? = 'default' OR tenant_id = ?)
+                    """,
+                    (tenant_id, tenant_id),
+                ).fetchone()
+            return int(row[0]) if row else 0
+        return self._with_retry(_count)
+
 
 def json_dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

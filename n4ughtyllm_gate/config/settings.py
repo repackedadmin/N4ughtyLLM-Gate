@@ -61,8 +61,9 @@ class Settings(BaseSettings):
     pending_data_ttl_seconds: int = 86400
     # Whether confirmation copy may include a redacted hit preview (legacy UI)
     confirmation_show_hit_preview: bool = True
-    # Deprecated: yes/no approval removed; dangerous output is auto-redacted/split regardless of this flag.
-    require_confirmation_on_block: bool = False
+    # Deprecated and unused: yes/no approval flow was removed. Setting N4UGHTYLLM_GATE_REQUIRE_CONFIRMATION_ON_BLOCK
+    # has no effect; dangerous output is auto-redacted/split regardless of this value.
+    require_confirmation_on_block: bool = Field(default=False, exclude=True)
     # When true, strict command rules block immediately (ignore security_level / risk threshold)
     strict_command_block_enabled: bool = False
     # high: full detection | medium (default): high-risk + redaction | low: mostly redact + extreme blocks
@@ -166,3 +167,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if settings.require_confirmation_on_block:
+    import warnings
+    warnings.warn(
+        "N4UGHTYLLM_GATE_REQUIRE_CONFIRMATION_ON_BLOCK is deprecated and has no effect. "
+        "The yes/no approval flow was removed. Remove this setting from your configuration.",
+        DeprecationWarning,
+        stacklevel=1,
+    )

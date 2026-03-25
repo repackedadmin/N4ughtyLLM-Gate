@@ -239,6 +239,26 @@ def ensure_runtime_storage_paths() -> None:
                     fallback_audit,
                 )
 
+    dangerous_log_path = (settings.dangerous_response_log_path or "").strip()
+    if dangerous_log_path:
+        configured_dangerous = Path(dangerous_log_path)
+        if not _can_append_file(configured_dangerous):
+            fallback_dangerous = fallback_dir / "dangerous_responses.jsonl"
+            if _can_append_file(fallback_dangerous):
+                settings.dangerous_response_log_path = str(fallback_dangerous)
+                logger.warning(
+                    "init_config: dangerous response log path not writable, switched to fallback configured=%s fallback=%s",
+                    configured_dangerous,
+                    fallback_dangerous,
+                )
+            else:
+                settings.dangerous_response_log_path = ""
+                logger.warning(
+                    "init_config: dangerous response log path not writable and fallback failed, disable dangerous response log configured=%s fallback=%s",
+                    configured_dangerous,
+                    fallback_dangerous,
+                )
+
 
 def main() -> None:
     """CLI entry or one-off container run."""

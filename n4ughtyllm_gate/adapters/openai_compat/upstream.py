@@ -17,6 +17,7 @@ from n4ughtyllm_gate.core.upstream_registry import (
     report_provider_success,
     report_provider_failure,
 )
+from n4ughtyllm_gate.observability.metrics import inc_upstream_error
 from n4ughtyllm_gate.util.logger import logger
 from n4ughtyllm_gate.util.redaction_whitelist import normalize_whitelist_keys
 
@@ -266,11 +267,13 @@ async def _forward_json(url: str, payload: dict[str, Any], headers: Mapping[str,
                 error=f"upstream_http_{response.status_code}",
                 status_code=response.status_code,
             )
+            inc_upstream_error(f"http_{response.status_code}")
         return response.status_code, _decode_json_or_text(response.content)
     except httpx.HTTPError as exc:
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("forward_json http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
         report_provider_failure(provider_id, error=detail, status_code=0)
+        inc_upstream_error("connection_error")
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc
 
 
@@ -295,6 +298,7 @@ async def _forward_stream_lines(
                     error=f"upstream_http_{resp.status_code}:{detail[:120]}",
                     status_code=resp.status_code,
                 )
+                inc_upstream_error(f"http_{resp.status_code}")
                 raise RuntimeError(f"upstream_http_error:{resp.status_code}:{detail}")
             async for chunk in resp.aiter_bytes():
                 if chunk:
@@ -306,4 +310,5 @@ async def _forward_stream_lines(
         detail = (str(exc) or "").strip() or "connection_failed_or_timeout"
         logger.warning("forward_stream http_error request_id=%s url=%s error=%s", trace_request_id, url, detail)
         report_provider_failure(provider_id, error=detail, status_code=0)
+        inc_upstream_error("connection_error")
         raise RuntimeError(f"upstream_unreachable: {detail}") from exc

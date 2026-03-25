@@ -243,6 +243,13 @@ class RuntimeStoreProxy(KVStore):
             removed += int(backend.clear_all_pending_confirmations())
         return removed
 
+    def count_pending_confirmations(self, *, tenant_id: str = "default") -> int:
+        with self._lock:
+            backend = self._backend
+        if backend is None:
+            return 0
+        return int(backend.count_pending_confirmations(tenant_id=tenant_id))
+
     def close(self) -> None:
         with self._lock:
             current_backend = self._backend
@@ -322,6 +329,10 @@ def close_runtime_dependencies() -> None:
 
 def prune_pending_confirmations(now_ts: int) -> int:
     return int(store.prune_pending_confirmations(now_ts))
+
+
+def count_pending_confirmations() -> int:
+    return int(store.count_pending_confirmations())
 
 
 def clear_pending_confirmations_on_startup() -> int:

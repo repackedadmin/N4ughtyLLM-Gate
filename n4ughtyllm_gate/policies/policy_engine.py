@@ -140,7 +140,11 @@ class PolicyEngine:
             enabled.add("redaction")
         if feature_flags.exact_value_redaction:
             enabled.add("exact_value_redaction")
-        raw_threshold = float(data.get("risk_threshold", 0.85))
+        # Policy YAML takes precedence; fall back to the operator-configured global
+        # setting (N4UGHTYLLM_GATE_RISK_SCORE_THRESHOLD) so the env var is honored
+        # when no per-policy override is present.
+        settings_threshold = float(settings.risk_score_threshold or 0.85)
+        raw_threshold = float(data.get("risk_threshold", settings_threshold))
         security_level = normalize_security_level()
         threshold = apply_threshold(raw_threshold, level=security_level)
         ctx.enabled_filters = enabled

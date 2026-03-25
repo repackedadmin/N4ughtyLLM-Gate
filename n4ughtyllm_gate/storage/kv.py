@@ -93,6 +93,10 @@ class KVStore(ABC):
     def clear_all_pending_confirmations(self) -> int:
         """Clear all pending confirmation records during startup recovery."""
 
+    @abstractmethod
+    def count_pending_confirmations(self, *, tenant_id: str = "default") -> int:
+        """Return the number of active (pending or executing) confirmation records."""
+
     def close(self) -> None:
         # File-backed stores do not need shutdown logic, but long-lived
         # networked backends can override this to release pooled resources.

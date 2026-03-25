@@ -496,3 +496,20 @@ class PostgresKVStore(KVStore):
                 removed = int(cur.rowcount or 0)
             conn.commit()
         return removed
+
+    def count_pending_confirmations(self, *, tenant_id: str = "default") -> int:
+        """Return the number of active (pending or executing) confirmation records."""
+        pending_table = f"{self.schema}.pending_confirmation"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if tenant_id == "default":
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {pending_table} WHERE status IN ('pending', 'executing')"
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {pending_table} WHERE status IN ('pending', 'executing') AND tenant_id = %s",
+                        (tenant_id,),
+                    )
+                row = cur.fetchone()
+        return int(row[0]) if row else 0

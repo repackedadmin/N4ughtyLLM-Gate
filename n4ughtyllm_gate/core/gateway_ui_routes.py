@@ -410,8 +410,13 @@ def register_ui_routes(app: FastAPI) -> None:
         try:
             from n4ughtyllm_gate.core.hot_reload import reload_security_rules
             reload_security_rules()
-        except Exception:
-            pass
+        except Exception as _reload_exc:
+            from n4ughtyllm_gate.util.logger import logger as _ui_logger
+            _ui_logger.warning(
+                "security rules hot-reload failed after save path=%s reason=%s",
+                str(path),
+                str(_reload_exc),
+            )
 
     def _get_section_list(data: dict, section_key: str) -> list:
         keys = _RULES_SECTIONS[section_key]

@@ -396,3 +396,19 @@ class RedisKVStore(KVStore):
                 pipe.zrem(self._pending_session_key(tenant_id, session_id), confirm_id)
         pipe.execute()
         return len(all_ids)
+
+    def count_pending_confirmations(self, *, tenant_id: str = "default") -> int:
+        """Return the number of active (pending or executing) confirmation records."""
+        retention_idx = self._pending_retention_key()
+        all_ids = self.client.zrange(retention_idx, 0, -1)
+        if not all_ids:
+            return 0
+        count = 0
+        for raw_id in all_ids:
+            confirm_id = _to_str(raw_id)
+            key = self._pending_key(confirm_id)
+            status = _to_str(self.client.hget(key, "status") or "")
+            rec_tenant = _to_str(self.client.hget(key, "tenant_id") or "default")
+            if status in ("pending", "executing") and (tenant_id == "default" or rec_tenant == tenant_id):
+                count += 1
+        return count
