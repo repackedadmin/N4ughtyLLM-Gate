@@ -123,10 +123,6 @@ No. The built-in TF-IDF semantic classifier runs locally (~166KB model file) wit
 **How do I deploy N4ughtyLLM Gate?**
 The recommended method is Docker Compose: `docker compose up -d`. The gateway runs on port 18080 with a built-in web management console at `/__ui__`. It supports SQLite (default), Redis, or PostgreSQL as storage backends. For production, place Caddy or nginx in front for TLS termination.
 
-**Do I need CLIProxyAPI, Sub2API, or AIClient-2-API?**
-No. Those external wrapper projects are no longer required. N4ughtyLLM Gate includes a native upstream engine: register providers directly via `POST /__gw__/providers`, configure routing policies and circuit breakers, and route traffic without any third-party proxy shim.
-
-
 ## Getting Started
 
 ### Before You Run
