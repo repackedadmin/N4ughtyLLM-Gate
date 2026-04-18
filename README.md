@@ -41,9 +41,7 @@ N4ughtyLLM Gate is a self-hosted, pipeline-based security proxy designed to prot
 | Web management UI | Yes | No | No | Dashboard |
 | MCP / Agent SKILL support | Yes | No | No | No |
 | No external API dependency | Yes (TF-IDF local) | Yes | No (OpenAI) | No |
-| Bilingual (EN/ZH) | Yes | English | English | English |
 
-> **Quick start:** `docker compose up -d` — gateway runs on port 18080, admin UI at `http://localhost:18080/__ui__`
 
 ### Architecture
 
