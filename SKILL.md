@@ -57,7 +57,7 @@ newgrp docker
 ### Git
 
 ```bash
-git clone https://github.com/ax128/N4ughtyLLM-Gate.git
+git clone https://github.com/repackedadmin/N4ughtyLLM-Gate.git
 cd N4ughtyLLM-Gate
 ```
 
@@ -148,7 +148,7 @@ curl -X POST "http://127.0.0.1:18080/v1/__gw__/t/<TOKEN>/responses" \
   -H "Authorization: Bearer <UPSTREAM_API_KEY>" \
   -d '{"model":"gpt-4.1-mini","input":"hello"}'
 ```
-
+/ax128/
 ### Direct upstream
 
 ```bash
